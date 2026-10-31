@@ -1,0 +1,24 @@
+# Datos y modelos: se rastrean con DVC, nunca con Git
+/data/**/*
+!/data/**/
+!/data/**/.gitkeep
+!/data/**/*.dvc
+/models/*
+!/models/.gitkeep
+!/models/*.dvc
+*.csv
+*.db
+*.joblib
+!*.dvc
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+.env
+
+# MLflow / Airflow locales
+mlruns/
+logs/
