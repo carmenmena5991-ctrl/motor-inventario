@@ -24,3 +24,9 @@
 - **Airflow 3 con componentes separados** (`api-server`, `scheduler`, `dag-processor`) sobre Postgres y `LocalExecutor`. El comando `webserver` y `SequentialExecutor` ya no existen en Airflow 3.
 - **Mismas versiones de librerías al entrenar y al predecir:** el modelo se serializa con `skops` y debe cargarse con la misma versión de scikit-learn con la que se entrenó.
 - **Historia de entrenamiento acotada** (`--dias-historia`): con el dataset completo (3 M filas) y 6 GB de RAM se entrena con el último año para limitar memoria y tiempo.
+
+## 6. Operación de los DAGs
+- **Sin datos del día, el run se omite:** si la bandeja todavía no tiene ventas de la fecha lógica, los DAGs 01 y 04 terminan con la tarea omitida (*skipped*) en lugar de procesar datos viejos como si fueran del día. Así 01 y 04 pueden estar activos aunque la bandeja contenga datos históricos. En producción esto significa que, si los datos llegan tarde, ese día no se emite pedido: conviene vigilar los runs omitidos.
+- **Fechas pasadas por backfill:** `airflow backfill create --dag-id 01_ingesta_y_validacion --from-date AAAA-MM-DD --to-date AAAA-MM-DD`. El límite superior no incluye su propio día: para llegar al día X se indica X+1.
+- **Evaluación honesta del seguimiento:** para medir el desempeño de un periodo pasado, el modelo `@Champions` debe estar entrenado solo con datos anteriores a ese periodo.
+- **Remoto de DVC permanente** en `~/product-dev/dvc-storage/motor-inventario` (antes `/tmp/dvc-storage`, que se borra al reiniciar WSL).

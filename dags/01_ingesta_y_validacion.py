@@ -6,6 +6,11 @@ data/processed/<ds>/validado/. Al terminar dispara el DAG 02 con la misma fecha.
 
 Programación: todos los días a las 06:00 (America/Guayaquil) con intervalos de datos:
 el run de las 06:00 del día D procesa ds = D-1, el último día con ventas completas.
+Si la bandeja todavía no tiene ventas de ds, el run se omite (skipped) en lugar de
+procesar datos viejos. Para fechas pasadas se usa un backfill:
+
+    airflow backfill create --dag-id 01_ingesta_y_validacion \
+        --from-date 2017-07-25 --to-date 2017-08-09
 """
 
 from __future__ import annotations
@@ -49,7 +54,9 @@ def ingesta_y_validacion():
     def ingestar(fecha: str) -> str:
         from inventario.almacen import guardar_datos, recortar_ventas
         from inventario.config import cargar_costos
-        from inventario.ingesta import leer_bandeja
+        from airflow.sdk.exceptions import AirflowSkipException
+
+        from inventario.ingesta import DatosNoDisponiblesError, exigir_ventas_del_dia, leer_bandeja
         from inventario.orquestacion import rutas
         from inventario.predecir import dias_historia_necesarios
 
@@ -57,6 +64,11 @@ def ingesta_y_validacion():
         horizonte = int(cargar_costos()["parametros_pedido"]["horizonte_dias"])
         # Calendario de feriados del horizonte incluido: se publica por adelantado.
         datos = leer_bandeja(fecha, r.bandeja, dias_calendario_futuro=horizonte)
+        try:
+            exigir_ventas_del_dia(datos)
+        except DatosNoDisponiblesError as error:
+            # Sin ventas del día no se emite pedido; validar y el disparo del 02 se omiten.
+            raise AirflowSkipException(str(error)) from error
         # Solo se conserva la historia que necesitan las features del pronóstico.
         datos = recortar_ventas(datos, dias_historia_necesarios(horizonte))
         return str(guardar_datos(datos, r.raw))

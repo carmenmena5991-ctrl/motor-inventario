@@ -46,6 +46,10 @@ class DatosBandeja:
     fecha_corte: pd.Timestamp
 
 
+class DatosNoDisponiblesError(RuntimeError):
+    """La bandeja todavía no tiene ventas de la fecha solicitada."""
+
+
 def normalizar_fecha(fecha: str | date | datetime | pd.Timestamp) -> pd.Timestamp:
     """Convierte cualquier representación de fecha (incluido un datetime con zona horaria
     de Airflow) a un Timestamp sin hora ni zona."""
@@ -109,3 +113,19 @@ def leer_bandeja(
         raise ValueError(f"La bandeja no tiene ventas anteriores o iguales a {corte.date()}")
 
     return DatosBandeja(ventas, petroleo, feriados, tiendas, corte)
+
+
+def exigir_ventas_del_dia(datos: DatosBandeja) -> DatosBandeja:
+    """Comprueba que la bandeja ya recibió las ventas de la fecha de corte.
+
+    Si la última venta es anterior al corte, procesar esa fecha usaría datos viejos como
+    si fueran del día; en ese caso se lanza `DatosNoDisponiblesError` (los DAGs lo
+    convierten en una tarea omitida).
+    """
+    ultima = datos.ventas["date"].max()
+    if pd.isna(ultima) or ultima < datos.fecha_corte:
+        hasta = "ninguna fecha" if pd.isna(ultima) else str(ultima.date())
+        raise DatosNoDisponiblesError(
+            f"La bandeja tiene ventas hasta {hasta}; aún no hay datos de {datos.fecha_corte.date()}"
+        )
+    return datos

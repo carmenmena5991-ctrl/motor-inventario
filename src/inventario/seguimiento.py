@@ -16,7 +16,7 @@ import pandas as pd
 from inventario.config import cargar_costos
 from inventario.evaluacion import costo_total_inventario, mae, rmse
 from inventario.features import CLAVES
-from inventario.ingesta import BANDEJA_DEFAULT, leer_bandeja, normalizar_fecha
+from inventario.ingesta import BANDEJA_DEFAULT, exigir_ventas_del_dia, leer_bandeja, normalizar_fecha
 from inventario.validacion import validar_ventas
 
 
@@ -91,7 +91,8 @@ def ejecutar_seguimiento(
     corte = normalizar_fecha(fecha_corte)
     directorio_predicciones = Path(directorio_predicciones)
 
-    ventas = validar_ventas(leer_bandeja(corte, bandeja).ventas)
+    # Sin ventas nuevas del día no hay nada nuevo que evaluar (DatosNoDisponiblesError).
+    ventas = validar_ventas(exigir_ventas_del_dia(leer_bandeja(corte, bandeja)).ventas)
 
     filas = []
     for emision in fechas_emision_evaluables(corte, horizonte, dias):

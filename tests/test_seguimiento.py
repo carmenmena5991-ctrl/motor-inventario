@@ -76,3 +76,10 @@ def test_sin_pedidos_evaluables(bandeja, ruta_costos, tmp_path):
     resultado = ejecutar_seguimiento("2017-04-20", bandeja, predicciones, ruta_costos)
     assert resultado.empty
     assert not list(predicciones.iterdir())
+
+
+def test_sin_ventas_del_dia_no_evalua(bandeja, ruta_costos, tmp_path):
+    from inventario.ingesta import DatosNoDisponiblesError
+
+    with pytest.raises(DatosNoDisponiblesError):
+        ejecutar_seguimiento("2017-05-10", bandeja, tmp_path, ruta_costos)
