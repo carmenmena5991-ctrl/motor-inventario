@@ -1,0 +1,31 @@
+"""Carga de la configuración de negocio (config/costos.yaml)."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+RUTA_COSTOS_DEFAULT = Path(__file__).resolve().parents[2] / "config" / "costos.yaml"
+
+
+def cargar_costos(ruta: str | Path | None = None) -> dict[str, Any]:
+    """Lee config/costos.yaml.
+
+    Prioridad de la ruta: argumento > variable de entorno INVENTARIO_COSTOS > ruta por defecto.
+    """
+    ruta = Path(ruta or os.environ.get("INVENTARIO_COSTOS", RUTA_COSTOS_DEFAULT))
+    with open(ruta, encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+
+    for seccion, claves in {
+        "costos": ("quiebre_stock", "merma"),
+        "parametros_pedido": ("horizonte_dias", "cuantil_objetivo", "factor_seguridad_default"),
+        "evaluacion": ("dias_historicos_comparar",),
+    }.items():
+        faltantes = [c for c in claves if c not in config.get(seccion, {})]
+        if faltantes:
+            raise KeyError(f"Faltan claves en {ruta} -> {seccion}: {faltantes}")
+    return config
