@@ -22,3 +22,4 @@ venv/
 # MLflow / Airflow locales
 mlruns/
 logs/
+/models
