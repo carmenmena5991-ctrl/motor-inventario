@@ -56,6 +56,41 @@ def crear_filas_futuras(
     return futuras[["date", *CLAVES, "sales", "onpromotion"]]
 
 
+def dias_historia_necesarios(horizonte: int) -> int:
+    """Días de historia que alimentan los lags y medias móviles del horizonte."""
+    return max(*LAGS, *VENTANAS) + horizonte
+
+
+def preparar_features_prediccion(
+    datos: DatosBandeja,
+    horizonte: int,
+    promociones: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Features de la historia reciente más las filas futuras del horizonte (sales vacío)."""
+    desde = datos.fecha_corte - pd.Timedelta(days=dias_historia_necesarios(horizonte))
+    historia = datos.ventas.loc[datos.ventas["date"] > desde]
+    futuras = crear_filas_futuras(historia, datos.fecha_corte, horizonte, promociones)
+    return construir_features(
+        pd.concat([historia, futuras], ignore_index=True),
+        datos.petroleo,
+        datos.feriados,
+        datos.tiendas,
+        horizonte=horizonte,
+    )
+
+
+def pronosticar_desde_features(modelo: Any, features: pd.DataFrame, fecha_corte: pd.Timestamp) -> pd.DataFrame:
+    """Aplica el modelo a las filas posteriores al corte."""
+    a_predecir = features.loc[features["date"] > fecha_corte]
+    if a_predecir.empty:
+        raise ValueError(f"No hay filas posteriores a {fecha_corte.date()} para pronosticar")
+    prediccion = np.clip(np.asarray(modelo.predict(a_predecir[columnas_modelo()]), dtype=float), 0, None)
+
+    resultado = a_predecir[["date", *CLAVES]].copy()
+    resultado["pronostico"] = prediccion
+    return resultado.reset_index(drop=True)
+
+
 def pronosticar(
     modelo: Any,
     datos: DatosBandeja,
@@ -63,24 +98,8 @@ def pronosticar(
     promociones: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Pronóstico diario (cuantil objetivo) para los `horizonte` días posteriores al corte."""
-    # Solo hace falta la historia que alimenta los lags y las medias móviles.
-    dias_historia = max(*LAGS, *VENTANAS) + horizonte
-    historia = datos.ventas.loc[datos.ventas["date"] > datos.fecha_corte - pd.Timedelta(days=dias_historia)]
-    futuras = crear_filas_futuras(historia, datos.fecha_corte, horizonte, promociones)
-
-    features = construir_features(
-        pd.concat([historia, futuras], ignore_index=True),
-        datos.petroleo,
-        datos.feriados,
-        datos.tiendas,
-        horizonte=horizonte,
-    )
-    a_predecir = features.loc[features["date"] > datos.fecha_corte]
-    prediccion = np.clip(np.asarray(modelo.predict(a_predecir[columnas_modelo()]), dtype=float), 0, None)
-
-    resultado = a_predecir[["date", *CLAVES]].copy()
-    resultado["pronostico"] = prediccion
-    return resultado.reset_index(drop=True)
+    features = preparar_features_prediccion(datos, horizonte, promociones)
+    return pronosticar_desde_features(modelo, features, datos.fecha_corte)
 
 
 def generar_pedido(pronostico: pd.DataFrame, fecha_corte: pd.Timestamp) -> pd.DataFrame:
