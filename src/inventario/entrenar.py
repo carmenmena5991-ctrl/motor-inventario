@@ -224,11 +224,21 @@ def ejecutar_entrenamiento(
     fecha_corte,
     bandeja: str | Path = BANDEJA_DEFAULT,
     ruta_costos: str | Path | None = None,
+    dias_historia: int | None = None,
     **kwargs,
 ) -> ResultadoEntrenamiento:
-    """Pipeline completo: ingesta -> validación -> features -> entrenamiento (para Airflow)."""
+    """Pipeline completo: ingesta -> validación -> features -> entrenamiento (para Airflow).
+
+    `dias_historia` limita las ventas a los últimos N días antes del corte (None = toda la
+    historia). Sirve para acotar memoria y tiempo con el dataset completo.
+    """
+    from inventario.almacen import recortar_ventas
+
     config = cargar_costos(ruta_costos)
-    datos = validar_datos(leer_bandeja(fecha_corte, bandeja))
+    datos = leer_bandeja(fecha_corte, bandeja)
+    if dias_historia is not None:
+        datos = recortar_ventas(datos, dias_historia)
+    datos = validar_datos(datos)
     features = construir_features(
         datos.ventas,
         datos.petroleo,
@@ -236,5 +246,9 @@ def ejecutar_entrenamiento(
         datos.tiendas,
         horizonte=int(config["parametros_pedido"]["horizonte_dias"]),
     )
-    etiquetas = {"fecha_corte": str(datos.fecha_corte.date()), **kwargs.pop("etiquetas", {})}
+    etiquetas = {
+        "fecha_corte": str(datos.fecha_corte.date()),
+        "dias_historia": str(dias_historia or "todos"),
+        **kwargs.pop("etiquetas", {}),
+    }
     return entrenar(features, config, etiquetas=etiquetas, **kwargs)

@@ -49,16 +49,16 @@ def seguimiento_desempeno():
         return resolver(get_current_context())
 
     @task
-    def evaluar_pedidos_publicados(ds: str) -> str | None:
+    def evaluar_pedidos_publicados(fecha: str) -> str | None:
         from inventario.orquestacion import rutas
         from inventario.seguimiento import ejecutar_seguimiento
 
-        r = rutas(ds)
-        resultado = ejecutar_seguimiento(ds, r.bandeja, r.predicciones, ruta_salida=r.seguimiento)
+        r = rutas(fecha)
+        resultado = ejecutar_seguimiento(fecha, r.bandeja, r.predicciones, ruta_salida=r.seguimiento)
         if resultado.empty:
-            log.info("No hay pedidos con horizonte completo para evaluar a %s", ds)
+            log.info("No hay pedidos con horizonte completo para evaluar a %s", fecha)
             return None
-        log.info("Seguimiento a %s:\n%s", ds, resultado.to_string(index=False))
+        log.info("Seguimiento a %s:\n%s", fecha, resultado.to_string(index=False))
         return str(r.seguimiento)
 
     evaluar_pedidos_publicados(resolver_fecha())

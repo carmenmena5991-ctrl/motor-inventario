@@ -1,0 +1,135 @@
+# Motor de Reposición de Inventario: MLflow 3 + Airflow 3 en la red compartida inventarioNet.
+#
+# Primer arranque:
+#   python scripts/preparar_bandeja.py        # crea bandeja_origen/ desde data/raw_kaggle
+#   mkdir -p logs
+#   docker compose up -d --build
+#
+# MLflow:  http://localhost:5000   (desde contenedores: http://mlflow:5000)
+# Airflow: http://localhost:8080   (sin login: todos son admin, solo para uso local)
+
+name: motor-inventario
+
+networks:
+  inventarioNet:
+    name: inventarioNet
+    driver: bridge
+
+volumes:
+  mlflow_db:
+  mlflow_artefactos:
+  airflow_postgres:
+
+x-airflow-comun: &airflow-comun
+  build: ./docker/airflow
+  image: motor-inventario/airflow:3.3.2
+  # Mismo UID que el usuario de Ubuntu para poder escribir en ./data y ./logs.
+  user: "${AIRFLOW_UID:-1000}:0"
+  networks: [inventarioNet]
+  environment:
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
+    # Todos los componentes deben compartir el secreto con el que se firman los tokens.
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:-secreto-local-inventario}
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "true"
+    MLFLOW_TRACKING_URI: http://mlflow:5000
+    INVENTARIO_DIR: /opt/airflow
+    PYTHONPATH: /opt/airflow/src
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./src:/opt/airflow/src
+    - ./config:/opt/airflow/config
+    - ./data:/opt/airflow/data
+    - ./bandeja_origen:/opt/airflow/bandeja_origen:ro
+    - ./logs:/opt/airflow/logs
+  depends_on: &airflow-depende
+    postgres:
+      condition: service_healthy
+    mlflow:
+      condition: service_healthy
+    airflow-init:
+      condition: service_completed_successfully
+
+services:
+  # MLflow 3: Tracking + Model Registry. La versión coincide con el cliente (mlflow==3.17.2).
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v3.17.2
+    container_name: mlflow_server
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    networks: [inventarioNet]
+    volumes:
+      - mlflow_db:/mlflow/db
+      - mlflow_artefactos:/mlflow/artifacts
+    # --artifacts-destination + --serve-artifacts: los clientes suben y descargan los
+    #   modelos a través del servidor (mlflow-artifacts:/), no por rutas locales.
+    # --allowed-hosts: MLflow 3 solo acepta localhost por defecto; Airflow llama a mlflow:5000.
+    command: >
+      mlflow server
+      --backend-store-uri sqlite:////mlflow/db/mlflow.db
+      --artifacts-destination /mlflow/artifacts
+      --serve-artifacts
+      --allowed-hosts mlflow,mlflow:5000,localhost,localhost:5000,127.0.0.1,127.0.0.1:5000
+      --host 0.0.0.0
+      --port 5000
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    networks: [inventarioNet]
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  airflow-init:
+    <<: *airflow-comun
+    command: db migrate
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  airflow-apiserver:
+    <<: *airflow-comun
+    command: api-server
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/version"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  airflow-scheduler:
+    <<: *airflow-comun
+    command: scheduler
+    restart: unless-stopped
+    depends_on:
+      <<: *airflow-depende
+      airflow-apiserver:
+        condition: service_healthy
+
+  airflow-dag-processor:
+    <<: *airflow-comun
+    command: dag-processor
+    restart: unless-stopped

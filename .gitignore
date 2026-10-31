@@ -23,3 +23,6 @@ venv/
 mlruns/
 logs/
 /models
+
+# Bandeja de entrada (se genera con scripts/preparar_bandeja.py desde data/raw_kaggle)
+/bandeja_origen/

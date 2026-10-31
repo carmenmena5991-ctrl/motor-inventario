@@ -46,30 +46,30 @@ def ingesta_y_validacion():
         return resolver(get_current_context())
 
     @task
-    def ingestar(ds: str) -> str:
+    def ingestar(fecha: str) -> str:
         from inventario.almacen import guardar_datos, recortar_ventas
         from inventario.config import cargar_costos
         from inventario.ingesta import leer_bandeja
         from inventario.orquestacion import rutas
         from inventario.predecir import dias_historia_necesarios
 
-        r = rutas(ds)
+        r = rutas(fecha)
         horizonte = int(cargar_costos()["parametros_pedido"]["horizonte_dias"])
         # Calendario de feriados del horizonte incluido: se publica por adelantado.
-        datos = leer_bandeja(ds, r.bandeja, dias_calendario_futuro=horizonte)
+        datos = leer_bandeja(fecha, r.bandeja, dias_calendario_futuro=horizonte)
         # Solo se conserva la historia que necesitan las features del pronóstico.
         datos = recortar_ventas(datos, dias_historia_necesarios(horizonte))
         return str(guardar_datos(datos, r.raw))
 
     @task
-    def validar(ds: str, ruta_raw: str) -> str:
+    def validar(fecha: str, ruta_raw: str) -> str:
         from inventario.almacen import cargar_datos, guardar_datos
         from inventario.orquestacion import rutas
         from inventario.validacion import validar_datos
 
         # Lanza DatosInvalidosError y detiene el pipeline si hay datos corruptos.
         datos = validar_datos(cargar_datos(ruta_raw))
-        return str(guardar_datos(datos, rutas(ds).validado))
+        return str(guardar_datos(datos, rutas(fecha).validado))
 
     fecha = resolver_fecha()
     validado = validar(fecha, ingestar(fecha))
