@@ -43,7 +43,7 @@ def pronostico_y_pedido():
         return resolver(get_current_context())
 
     @task
-    def pronosticar_y_generar_pedido(ds: str) -> str:
+    def pronosticar_y_generar_pedido(fecha: str) -> str:
         import pandas as pd
 
         from inventario.almacen import cargar_tabla
@@ -55,8 +55,8 @@ def pronostico_y_pedido():
             pronosticar_desde_features,
         )
 
-        r = rutas(ds)
-        corte = pd.Timestamp(ds)
+        r = rutas(fecha)
+        corte = pd.Timestamp(fecha)
         features = cargar_tabla(r.features)
         modelo = cargar_modelo_champions()
         pronostico = pronosticar_desde_features(modelo, features, corte)

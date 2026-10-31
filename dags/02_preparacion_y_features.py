@@ -45,13 +45,13 @@ def preparacion_y_features():
         return resolver(get_current_context())
 
     @task
-    def construir_features(ds: str) -> str:
+    def construir_features(fecha: str) -> str:
         from inventario.almacen import cargar_datos, guardar_tabla
         from inventario.config import cargar_costos
         from inventario.orquestacion import rutas
         from inventario.predecir import preparar_features_prediccion
 
-        r = rutas(ds)
+        r = rutas(fecha)
         horizonte = int(cargar_costos()["parametros_pedido"]["horizonte_dias"])
         features = preparar_features_prediccion(cargar_datos(r.validado), horizonte)
         return str(guardar_tabla(features, r.features))

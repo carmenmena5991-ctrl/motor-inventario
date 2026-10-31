@@ -65,3 +65,24 @@ def test_solo_01_y_04_estan_programados(dagbag):
     assert dagbag.dags["03_pronostico_y_pedido"].timetable.can_be_scheduled is False
     assert dagbag.dags["01_ingesta_y_validacion"].timetable.can_be_scheduled
     assert dagbag.dags["04_seguimiento_desempeno"].timetable.can_be_scheduled
+
+
+# Claves del contexto de Airflow que una tarea TaskFlow no puede recibir como argumento
+# explícito (Airflow 3 lanza "The key 'ds' in args is a part of kwargs and therefore reserved").
+CLAVES_RESERVADAS = {
+    "ds", "ds_nodash", "ts", "ts_nodash", "logical_date", "data_interval_start",
+    "data_interval_end", "params", "ti", "task_instance", "dag_run", "dag", "run_id",
+    "conf", "macros", "var", "conn", "inlets", "outlets", "task", "triggering_asset_events",
+}
+
+
+def test_tareas_no_usan_claves_reservadas_del_contexto(dagbag):
+    import inspect
+
+    for dag in dagbag.dags.values():
+        for tarea in dag.tasks:
+            funcion = getattr(tarea, "python_callable", None)
+            if funcion is None:
+                continue
+            conflictos = set(inspect.signature(funcion).parameters) & CLAVES_RESERVADAS
+            assert not conflictos, f"{dag.dag_id}.{tarea.task_id} usa claves reservadas: {conflictos}"
