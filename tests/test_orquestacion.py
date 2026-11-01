@@ -50,3 +50,22 @@ def test_rutas_desde_variables_de_entorno(tmp_path, monkeypatch):
     r = rutas("2017-03-15")
     assert r.base == tmp_path
     assert r.bandeja == Path("/datos/bandeja")
+
+
+def test_reproceso_usa_otra_clave_y_no_pisa_lo_publicado(tmp_path):
+    from inventario.orquestacion import resolver_conocimiento
+
+    normal = rutas("2017-07-20", base=tmp_path)
+    reproceso = rutas("2017-07-20", base=tmp_path, conocimiento="2017-08-15")
+    assert normal.clave == "2017-07-20"
+    assert reproceso.clave == "2017-07-20__conocimiento_2017-08-15"
+    assert reproceso.pedido.name == "pedido_2017-07-20__conocimiento_2017-08-15.csv"
+    assert reproceso.pedido != normal.pedido
+    assert rutas("2017-07-20", base=tmp_path, conocimiento="2017-07-20").clave == "2017-07-20"
+    with pytest.raises(ValueError):
+        rutas("2017-07-20", base=tmp_path, conocimiento="2017-07-01")
+
+    run = SimpleNamespace(conf={"conocimiento": "2017-08-15"})
+    assert resolver_conocimiento({"dag_run": run}) == "2017-08-15"
+    for vacio in (None, "", "None"):
+        assert resolver_conocimiento({"dag_run": SimpleNamespace(conf={"conocimiento": vacio}), "params": {}}) is None

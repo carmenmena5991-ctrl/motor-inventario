@@ -37,7 +37,7 @@ def test_filas_futuras_con_promociones_planificadas():
 
 
 def test_pronostico_solo_para_fechas_posteriores_al_corte(bandeja, baseline):
-    datos = leer_bandeja(CORTE, bandeja, dias_calendario_futuro=7)
+    datos = leer_bandeja(CORTE, bandeja)
     pronostico = pronosticar(baseline, datos, horizonte=7)
     assert len(pronostico) == 2 * 2 * 7  # tiendas x familias x días
     assert pronostico["date"].min() > CORTE

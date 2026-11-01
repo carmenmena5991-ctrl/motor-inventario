@@ -11,14 +11,7 @@ from typing import Iterable
 
 import pandas as pd
 
-from inventario.ingesta import DatosBandeja
-
-COLUMNAS_REQUERIDAS = {
-    "ventas": ["date", "store_nbr", "family", "sales", "onpromotion"],
-    "petroleo": ["date", "dcoilwtico"],
-    "feriados": ["date", "type", "locale", "locale_name", "transferred"],
-    "tiendas": ["store_nbr", "city", "state"],
-}
+from inventario.ingesta import COLUMNAS_REQUERIDAS, DatosBandeja
 
 
 class DatosInvalidosError(ValueError):
@@ -75,6 +68,17 @@ def validar_petroleo(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def validar_transacciones(df: pd.DataFrame) -> pd.DataFrame:
+    nombre = "transacciones"
+    _exigir_columnas(df, COLUMNAS_REQUERIDAS[nombre], nombre)
+    _exigir_no_nulos(df, ["date", "store_nbr"], nombre)
+    _exigir_numerico_no_negativo(df, "transactions", nombre)
+    duplicados = int(df.duplicated(subset=["date", "store_nbr"]).sum())
+    if duplicados:
+        raise DatosInvalidosError(f"[transacciones] {duplicados} filas duplicadas por (date, store_nbr)")
+    return df
+
+
 def validar_feriados(df: pd.DataFrame) -> pd.DataFrame:
     nombre = "feriados"
     _exigir_columnas(df, COLUMNAS_REQUERIDAS[nombre], nombre)
@@ -98,8 +102,12 @@ def validar_datos(datos: DatosBandeja) -> DatosBandeja:
     validar_feriados(datos.feriados)
     if datos.tiendas is not None:
         validar_tiendas(datos.tiendas)
+    if datos.transacciones is not None:
+        validar_transacciones(datos.transacciones)
 
-    for nombre, df in (("ventas", datos.ventas), ("petroleo", datos.petroleo)):
+    for nombre, df in (("ventas", datos.ventas), ("petroleo", datos.petroleo), ("transacciones", datos.transacciones)):
+        if df is None:
+            continue
         if (df["date"] > datos.fecha_corte).any():
             raise DatosInvalidosError(
                 f"[{nombre}] hay registros posteriores a la fecha de corte {datos.fecha_corte.date()}"

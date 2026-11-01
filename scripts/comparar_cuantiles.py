@@ -67,7 +67,7 @@ def main() -> None:
     dias = int(config["evaluacion"]["dias_historicos_comparar"])
     cortes = cortes_mensuales(args.desde, args.hasta)
     ultima_evaluacion = cortes[-1] + pd.Timedelta(days=h + dias + 1)
-    completo = leer_bandeja(ultima_evaluacion, args.bandeja, dias_calendario_futuro=h)
+    completo = leer_bandeja(ultima_evaluacion, args.bandeja)
 
     def a_fecha(fecha: pd.Timestamp, dias_futuro: int = 0) -> DatosBandeja:
         """Lo que la bandeja tenía disponible en `fecha` (sin leakage)."""

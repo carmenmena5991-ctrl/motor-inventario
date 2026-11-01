@@ -225,17 +225,19 @@ def ejecutar_entrenamiento(
     bandeja: str | Path = BANDEJA_DEFAULT,
     ruta_costos: str | Path | None = None,
     dias_historia: int | None = None,
+    fecha_conocimiento=None,
     **kwargs,
 ) -> ResultadoEntrenamiento:
     """Pipeline completo: ingesta -> validación -> features -> entrenamiento (para Airflow).
 
     `dias_historia` limita las ventas a los últimos N días antes del corte (None = toda la
     historia). Sirve para acotar memoria y tiempo con el dataset completo.
+    `fecha_conocimiento` permite entrenar con correcciones entregadas después del corte.
     """
     from inventario.almacen import recortar_ventas
 
     config = cargar_costos(ruta_costos)
-    datos = leer_bandeja(fecha_corte, bandeja)
+    datos = leer_bandeja(fecha_corte, bandeja, fecha_conocimiento=fecha_conocimiento)
     if dias_historia is not None:
         datos = recortar_ventas(datos, dias_historia)
     datos = validar_datos(datos)

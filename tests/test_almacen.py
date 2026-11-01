@@ -63,7 +63,7 @@ def test_cadena_de_dags_equivale_a_predecir_con_toda_la_historia(bandeja, tmp_pa
     modelo = BaselinePromedioMovil(ventana=28).fit(pd.DataFrame({"media_movil_28": [0.0]}))
 
     # DAG 01
-    datos = leer_bandeja(CORTE, bandeja, dias_calendario_futuro=horizonte)
+    datos = leer_bandeja(CORTE, bandeja)
     raw = guardar_datos(recortar_ventas(datos, dias_historia_necesarios(horizonte)), tmp_path / "raw")
     validado = guardar_datos(validar_datos(cargar_datos(raw)), tmp_path / "validado")
     # DAG 02
@@ -75,3 +75,20 @@ def test_cadena_de_dags_equivale_a_predecir_con_toda_la_historia(bandeja, tmp_pa
 
     directo = pronosticar(modelo, datos, horizonte)
     pd.testing.assert_frame_equal(encadenado, directo, check_dtype=False)
+
+
+def test_guarda_metadatos_de_trazabilidad(bandeja, tmp_path):
+    ruta = bandeja / "ventas" / "ventas_2017-04-10.csv"
+    corrupta = pd.read_csv(ruta)
+    corrupta.loc[0, "sales"] = -1
+    corrupta.to_csv(ruta, index=False)
+
+    datos = leer_bandeja(CORTE, bandeja)
+    cargados = cargar_datos(guardar_datos(datos, tmp_path / "etapa"))
+    assert cargados.entregas == datos.entregas
+    assert cargados.cuarentena == datos.cuarentena == (
+        ("ventas/ventas_2017-04-10.csv", datos.cuarentena[0][1]),
+    )
+    assert cargados.correcciones == datos.correcciones
+    assert cargados.fecha_conocimiento == datos.fecha_conocimiento
+    pd.testing.assert_frame_equal(cargados.transacciones, datos.transacciones, check_dtype=False)

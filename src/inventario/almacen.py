@@ -17,7 +17,7 @@ import pandas as pd
 
 from inventario.ingesta import DatosBandeja, normalizar_fecha
 
-FUENTES = ("ventas", "petroleo", "feriados", "tiendas")
+FUENTES = ("ventas", "transacciones", "petroleo", "feriados", "tiendas")
 
 
 def guardar_datos(datos: DatosBandeja, directorio: str | Path) -> Path:
@@ -31,9 +31,15 @@ def guardar_datos(datos: DatosBandeja, directorio: str | Path) -> Path:
         df = getattr(datos, fuente)
         if df is not None:
             df.to_parquet(temporal / f"{fuente}.parquet", index=False)
-    (temporal / "meta.json").write_text(
-        json.dumps({"fecha_corte": str(datos.fecha_corte.date())}), encoding="utf-8"
-    )
+    conocimiento = datos.fecha_conocimiento if datos.fecha_conocimiento is not None else datos.fecha_corte
+    meta = {
+        "fecha_corte": str(datos.fecha_corte.date()),
+        "fecha_conocimiento": str(conocimiento.date()),
+        "entregas": list(datos.entregas),
+        "cuarentena": [list(c) for c in datos.cuarentena],
+        "correcciones": dict(datos.correcciones),
+    }
+    (temporal / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
     shutil.rmtree(directorio, ignore_errors=True)
     temporal.rename(directorio)
@@ -53,7 +59,14 @@ def cargar_datos(directorio: str | Path) -> DatosBandeja:
         tablas[fuente] = pd.read_parquet(ruta) if ruta.exists() else None
     if tablas["ventas"] is None or tablas["petroleo"] is None or tablas["feriados"] is None:
         raise FileNotFoundError(f"Faltan fuentes obligatorias en {directorio}")
-    return DatosBandeja(fecha_corte=normalizar_fecha(meta["fecha_corte"]), **tablas)
+    return DatosBandeja(
+        fecha_corte=normalizar_fecha(meta["fecha_corte"]),
+        fecha_conocimiento=normalizar_fecha(meta.get("fecha_conocimiento", meta["fecha_corte"])),
+        entregas=tuple(meta.get("entregas", [])),
+        cuarentena=tuple(tuple(c) for c in meta.get("cuarentena", [])),
+        correcciones=dict(meta.get("correcciones", {})),
+        **tablas,
+    )
 
 
 def recortar_ventas(datos: DatosBandeja, dias: int) -> DatosBandeja:

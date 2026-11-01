@@ -2,6 +2,7 @@
 
 ## 1. Manejo del Tiempo y Data Leakage
 - **Filtrado por Fecha de Corte:** Las funciones de ingesta descartan cualquier registro posterior a la fecha lógica de ejecución (`logical_date` / `ds`), garantizando que solo se use la información disponible hasta el momento de emisión.
+- **Filtrado por Fecha de Entrega:** además del corte por fecha de los datos, solo se usan los archivos que ya se habían entregado en la bandeja en la fecha de emisión, para que las entregas tardías y las correcciones no se filtren hacia atrás (ver sección 8).
 - **Horizonte de Rezago en Features:** Las variables explicativas (lags y medias móviles) se calculan con una ventana mínima de 7 días atrás para evitar fugas de información futura durante el entrenamiento e inferencia.
 
 ## 2. Idempotencia, Backfill y Manejo de Errores
@@ -97,3 +98,40 @@ El seguimiento al 2017-08-15 de los 14 pedidos emitidos del 26-jul al 8-ago (mod
 - `@Champions` reentrenado con datos hasta el 2017-08-15 y `cuantil_objetivo: 0.71` → versión 4 del modelo `motor_inventario` (gana HistGradientBoosting).
 - En los 14 días de validación del entrenamiento, el costo de inventario bajó de 7,37 M (p90, versión 3) a 5,57 M (p71), un 24 % menos; el RMSE pasó de 442 a 312.
 - El pedido sugerido del 2017-08-15, regenerado por la cadena 01 → 02 → 03 en Airflow, bajó de 6,32 M a 5,74 M unidades (−9 %).
+
+## 8. Bandeja por entregas, disponibilidad de la información y correcciones
+### 8.1 Sistema de origen simulado
+`scripts/preparar_bandeja.py` (lógica en `inventario.simulacion`) convierte los CSV de Kaggle en una bandeja con **un archivo por fuente y por fecha de entrega**: `bandeja_origen/<fuente>/<fuente>_<AAAA-MM-DD>.csv`. La fecha del nombre es cuándo llegó el archivo, no la fecha de los datos que contiene. La configuración está versionada en `config/bandeja.yaml`:
+
+| Fuente | Cómo llega | Justificación |
+|---|---|---|
+| ventas (`train.csv`) | Diario; las ventas de D en la entrega D | Fuente principal; sin ella no se emite pedido |
+| transacciones (`transactions.csv`) | Diario, 1 día de retraso | Sistema de cajas que consolida al día siguiente |
+| petróleo (`oil.csv`) | Días hábiles, 1 día de retraso | Precio de cierre publicado al día siguiente; sin mercado en fin de semana |
+| feriados (`holidays_events.csv`) | Mensual: el día 1 llega el calendario del mes siguiente | El calendario oficial se publica por adelantado |
+| tiendas (`stores.csv`) | Una vez, en la carga histórica | Catálogo casi estático |
+
+- **Carga histórica inicial:** todo lo entregado hasta `fin_carga_historica` (2017-06-30) llega en un solo archivo por fuente con esa fecha. Del 2017-07-01 al 2017-08-15 hay entregas diarias.
+- **Incidencias** (semilla fija, reproducibles): entregas tardías (5 % de los días de ventas, transacciones y petróleo, 1-3 días extra), correcciones (10 % de los días de ventas; 2 % de sus filas llegan con valor ×0,5-1,5 y el valor real llega 1-5 días después) y entregas corruptas (3 % de los archivos de ventas traen una venta negativa y se reenvían válidos al día siguiente). La última versión entregada de cada fila coincide con el dato de Kaggle.
+- El detalle de cada incidencia simulada queda en `data/processed/bandeja_incidencias.csv`.
+
+### 8.2 Reglas de lectura (`inventario.ingesta.leer_bandeja`)
+1. **Por fecha de entrega:** solo se usan archivos entregados hasta la fecha de conocimiento (por defecto, la fecha lógica `ds`). Es la regla que garantiza el principio fundamental: un backfill al 1-ago no ve una corrección ni un dato tardío que llegó el 10-ago.
+2. **Cuarentena por archivo:** cada archivo se valida por separado; si es inválido se excluye y queda registrado en el log del DAG 01 y en `meta.json` (`cuarentena`). El control final sobre los datos combinados (`validar_datos`) sigue deteniendo el run si algo inválido llegara a pasar.
+3. **Correcciones:** si una fila llega varias veces, prevalece la entrega más reciente. `meta.json` registra cuántas filas fueron reemplazadas.
+4. **Corte por fecha de datos:** ventas, transacciones y petróleo nunca pasan de `ds`; los feriados entregados pueden traer fechas futuras porque el calendario se conoce por adelantado.
+5. **Fuentes secundarias opcionales:** si petróleo, transacciones, feriados o tiendas no han llegado, se continúa (el petróleo faltante se rellena con el último precio conocido). Si faltan las ventas del día, el run se omite.
+6. **La bandeja es de solo lectura:** el código nunca la modifica y en Docker se monta con `:ro`.
+
+`meta.json` de cada etapa guarda además la lista de archivos de la bandeja usados (`entregas`), lo que permite rastrear cada pedido hasta los datos que lo produjeron.
+
+### 8.3 Reprocesamiento de datos corregidos
+- **Los pedidos publicados no se reescriben:** reflejan lo que se sabía al emitirlos, y así se pueden reproducir.
+- **Las correcciones se incorporan solas** en todo lo que se calcula después: los pedidos de los días siguientes, el seguimiento del DAG 04 (que en cada run reevalúa su ventana con la última versión de las ventas) y los reentrenamientos.
+- **Reproceso explícito de una fecha pasada:** `airflow dags trigger 01_ingesta_y_validacion -c '{"ds": "2017-07-04", "conocimiento": "2017-07-06"}'` usa las entregas hasta `conocimiento` sin datos posteriores a `ds`. Las salidas se guardan con la clave `2017-07-04__conocimiento_2017-07-06` (por ejemplo, `pedido_2017-07-04__conocimiento_2017-07-06.csv`), así que el pedido publicado sigue intacto y se puede comparar con el reprocesado.
+
+### 8.4 Alternativas descartadas
+- **Filtrar por la fecha de los datos** (diseño anterior): un backfill usaba correcciones y entregas tardías que aún no existían al emitir, una fuga de información.
+- **Detener el run ante un archivo inválido:** como cada run lee todas las entregas anteriores, un solo archivo corrupto habría hecho fallar todos los runs futuros. La cuarentena aísla el archivo y deja continuar.
+- **Sobrescribir el pedido publicado al llegar una corrección:** se perdería la reproducibilidad de lo que realmente se entregó al negocio.
+- **Esperar las ventas tardías con un sensor:** bloquearía el slot del DAG por un tiempo indefinido; se prefirió omitir el run y que el día siguiente use los datos que hayan llegado.

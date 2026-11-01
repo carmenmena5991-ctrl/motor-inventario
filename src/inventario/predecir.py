@@ -118,12 +118,16 @@ def generar_pedido(pronostico: pd.DataFrame, fecha_corte: pd.Timestamp) -> pd.Da
     return pedido
 
 
-def guardar_pedido(pedido: pd.DataFrame, fecha_corte: pd.Timestamp, directorio: str | Path = DIRECTORIO_PREDICCIONES) -> Path:
-    """Escribe data/predictions/pedido_<fecha>.csv. Sobrescribe el archivo de esa fecha, de
-    modo que re-ejecutar el mismo día no duplica resultados."""
-    directorio = Path(directorio)
-    directorio.mkdir(parents=True, exist_ok=True)
-    ruta = directorio / f"pedido_{fecha_corte.date()}.csv"
+def guardar_pedido(
+    pedido: pd.DataFrame,
+    fecha_corte: pd.Timestamp,
+    directorio: str | Path = DIRECTORIO_PREDICCIONES,
+    ruta: str | Path | None = None,
+) -> Path:
+    """Escribe data/predictions/pedido_<fecha>.csv (o `ruta`, si se indica). Sobrescribe el
+    archivo de esa fecha, de modo que re-ejecutar el mismo día no duplica resultados."""
+    ruta = Path(ruta) if ruta is not None else Path(directorio) / f"pedido_{fecha_corte.date()}.csv"
+    ruta.parent.mkdir(parents=True, exist_ok=True)
     pedido.to_csv(ruta, index=False)
     return ruta
 
@@ -141,7 +145,7 @@ def ejecutar_prediccion(
     pronóstico -> pedido sugerido en disco."""
     config = cargar_costos(ruta_costos)
     horizonte = int(config["parametros_pedido"]["horizonte_dias"])
-    datos = validar_datos(leer_bandeja(fecha_corte, bandeja, dias_calendario_futuro=horizonte))
+    datos = validar_datos(leer_bandeja(fecha_corte, bandeja))
     modelo = modelo if modelo is not None else cargar_modelo_champions(**kwargs_modelo)
     pronostico = pronosticar(modelo, datos, horizonte, promociones)
     return guardar_pedido(generar_pedido(pronostico, datos.fecha_corte), datos.fecha_corte, directorio_salida)

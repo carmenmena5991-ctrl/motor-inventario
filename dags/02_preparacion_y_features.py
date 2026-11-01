@@ -6,7 +6,8 @@ petróleo, calendario) para la historia reciente y las filas del horizonte, y la
 data/processed/<ds>/features.parquet. La escritura reemplaza la de la misma fecha, así que
 re-ejecutar es idempotente. Al terminar dispara el DAG 03.
 
-Lo dispara el DAG 01 con conf={"ds": ...}; también se puede lanzar a mano con ese conf.
+Lo dispara el DAG 01 con conf={"ds": ..., "conocimiento": ...}; también se puede lanzar a
+mano con ese conf.
 """
 
 from __future__ import annotations
@@ -24,7 +25,10 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 ZONA = "America/Guayaquil"
-FECHA_XCOM = "{{ ti.xcom_pull(task_ids='resolver_fecha') }}"
+
+
+def _xcom(clave: str) -> str:
+    return "{{ ti.xcom_pull(task_ids='resolver_fecha', key='" + clave + "') }}"
 
 
 @dag(
@@ -34,35 +38,41 @@ FECHA_XCOM = "{{ ti.xcom_pull(task_ids='resolver_fecha') }}"
     start_date=pendulum.datetime(2017, 1, 1, tz=ZONA),
     catchup=False,
     default_args={"owner": "inventario", "retries": 2, "retry_delay": timedelta(minutes=5)},
-    params={"ds": Param(None, type=["null", "string"], description="Fecha lógica YYYY-MM-DD")},
+    params={
+        "ds": Param(None, type=["null", "string"], description="Fecha lógica YYYY-MM-DD"),
+        "conocimiento": Param(None, type=["null", "string"], description="Fecha de conocimiento (reproceso)"),
+    },
     tags=["inventario", "features"],
 )
 def preparacion_y_features():
-    @task
-    def resolver_fecha() -> str:
-        from inventario.orquestacion import resolver_fecha as resolver
+    @task(multiple_outputs=True)
+    def resolver_fecha() -> dict[str, str]:
+        from inventario.orquestacion import resolver_conocimiento, resolver_fecha as resolver, rutas
 
-        return resolver(get_current_context())
+        contexto = get_current_context()
+        r = rutas(resolver(contexto), conocimiento=resolver_conocimiento(contexto))
+        return {"ds": r.ds, "conocimiento": r.conocimiento or "", "clave": r.clave}
 
     @task
-    def construir_features(fecha: str) -> str:
+    def construir_features(fecha: str, conocimiento: str) -> str:
         from inventario.almacen import cargar_datos, guardar_tabla
         from inventario.config import cargar_costos
         from inventario.orquestacion import rutas
         from inventario.predecir import preparar_features_prediccion
 
-        r = rutas(fecha)
+        r = rutas(fecha, conocimiento=conocimiento or None)
         horizonte = int(cargar_costos()["parametros_pedido"]["horizonte_dias"])
         features = preparar_features_prediccion(cargar_datos(r.validado), horizonte)
         return str(guardar_tabla(features, r.features))
 
-    features = construir_features(resolver_fecha())
+    fecha = resolver_fecha()
+    features = construir_features(fecha["ds"], fecha["conocimiento"])
 
     disparar = TriggerDagRunOperator(
         task_id="disparar_pronostico",
         trigger_dag_id="03_pronostico_y_pedido",
-        trigger_run_id=f"desde_02__{FECHA_XCOM}",
-        conf={"ds": FECHA_XCOM},
+        trigger_run_id="desde_02__" + _xcom("clave"),
+        conf={"ds": _xcom("ds"), "conocimiento": _xcom("conocimiento")},
         reset_dag_run=True,
         wait_for_completion=False,
     )
