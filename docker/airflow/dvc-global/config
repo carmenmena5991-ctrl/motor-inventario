@@ -1,0 +1,8 @@
+# Configuración global de DVC dentro de los contenedores de Airflow (DVC_GLOBAL_CONFIG_DIR).
+# El repositorio del host se monta en /opt/airflow con .git en solo lectura: aquí DVC solo
+# guarda datos en la caché y los sube al remoto. Los punteros .dvc los confirma en git una
+# persona, en una rama con Pull Request (ver DECISIONES.md, sección 10).
+[core]
+    no_scm = true
+    analytics = false
+    site_cache_dir = /tmp/dvc-site-cache

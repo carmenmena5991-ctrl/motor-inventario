@@ -102,6 +102,11 @@ class Rutas:
         return self.predicciones / f"pedido_{self.clave}.csv"
 
     @property
+    def manifiesto(self) -> Path:
+        """Qué produjo el pedido: código, modelo y datos con sus huellas (versionado.py)."""
+        return self.predicciones / f"pedido_{self.clave}.json"
+
+    @property
     def seguimiento(self) -> Path:
         return self.predicciones / f"seguimiento_{self.ds}.csv"
 

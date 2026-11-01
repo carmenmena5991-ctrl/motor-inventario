@@ -36,6 +36,12 @@ def cargar_modelo_champions(
     return mlflow.pyfunc.load_model(referencia)
 
 
+def cargar_modelo_local(ruta: str | Path):
+    """Carga un modelo exportado a disco (models/<nombre>/v<versión>/, rastreado por DVC).
+    No necesita el servidor MLflow: sirve para reproducir pedidos pasados."""
+    return mlflow.pyfunc.load_model(str(ruta))
+
+
 def crear_filas_futuras(
     ventas: pd.DataFrame,
     fecha_corte: pd.Timestamp,

@@ -22,7 +22,7 @@
 
 ## 5. Infraestructura (Docker Compose)
 - **MLflow 3.17.2 en servidor y cliente:** el cliente (entrenamiento y Airflow) usa la API de modelos de MLflow 3; un servidor 2.x no la soporta. Las versiones se fijan iguales en `docker/airflow/requirements.txt`.
-- **Artefactos servidos por MLflow** (`--artifacts-destination` + `--serve-artifacts`): los modelos se suben y descargan a través del servidor (`mlflow-artifacts:/`), sin depender de rutas locales compartidas. Base de datos y artefactos viven en volúmenes de Docker (`mlflow_db`, `mlflow_artefactos`) y no en `models/`, que está rastreado por DVC.
+- **Artefactos servidos por MLflow** (`--artifacts-destination` + `--serve-artifacts`): los modelos se suben y descargan a través del servidor (`mlflow-artifacts:/`), sin depender de rutas locales compartidas. Base de datos y artefactos viven en volúmenes de Docker (`mlflow_db`, `mlflow_artefactos`) ; además, cada versión que usa un pedido o que se entrena se exporta a `models/`, rastreado por DVC (sección 10).
 - **`--allowed-hosts`:** MLflow 3 solo acepta `localhost` por defecto; se habilita `mlflow:5000` para las llamadas desde la red `inventarioNet`.
 - **Airflow 3 con componentes separados** (`api-server`, `scheduler`, `dag-processor`) sobre Postgres y `LocalExecutor`. El comando `webserver` y `SequentialExecutor` ya no existen en Airflow 3.
 - **Mismas versiones de librerías al entrenar y al predecir:** el modelo se serializa con `skops` y debe cargarse con la misma versión de scikit-learn con la que se entrenó.
@@ -162,3 +162,38 @@ El seguimiento al 2017-08-15 de los 14 pedidos emitidos del 26-jul al 8-ago (mod
 - El pedido guarda la columna `modelo_version`, que lo liga a la versión exacta que lo produjo.
 - `@Champions` apunta siempre al último modelo promovido y **nunca retrocede**: si un backfill entrena un modelo para una fecha antigua, el alias no se mueve hacia él.
 - Las versiones registradas antes de este criterio (sin etiqueta `decision`) no se consideran vigentes.
+
+## 10. Versionado con DVC y reproducción de pedidos publicados
+### 10.1 Qué se versiona y quién lo hace
+| Ruta | Contenido | Lo versiona |
+|---|---|---|
+| `data/raw_kaggle/` | CSV originales de Kaggle (entrada) | a mano, una vez |
+| `data/raw/<clave>/` | foto de lo entregado en la bandeja hasta `ds` (DAG 01) | DAG 03 |
+| `data/processed/<clave>/` | datos validados y `features.parquet` (DAGs 01 y 02) | DAG 03 |
+| `data/predictions/` | `pedido_<clave>.csv`, su manifiesto `.json` y `seguimiento_<ds>.csv` | DAGs 03 y 04 |
+| `models/<nombre>/v<versión>/` | copia de cada versión del Model Registry que se usa o se entrena | DAGs 03 y 05 |
+
+- La tarea final `versionar` de los DAGs 03, 04 y 05 ejecuta `dvc add --no-relink` sobre esas rutas y `dvc push` al remoto. Corre en el pool `versionado` (1 slot), porque DVC bloquea el repositorio y dos operaciones a la vez fallarían.
+- `--no-relink`: sin él, después de guardar en la caché DVC borra y recrea desde ella los archivos rastreados. Los DAGs 01 y 02 siguen escribiendo mientras otro DAG versiona, y un reproceso de esa misma fecha podría quedar pisado por la versión anterior.
+- Cada fecha escribe en su propio directorio (`<clave>` = `ds`, o `<ds>__conocimiento_<fecha>` en un reproceso), así que una versión de DVC posterior **contiene todas las publicaciones anteriores sin cambios**: no hace falta un commit de DVC por pedido para poder recuperarlo.
+- **El pedido se genera con la copia exportada del modelo** (`models/…`), no con la del servidor MLflow. Lo que DVC versiona es exactamente lo que produjo el pedido, y reproducirlo no depende de que el servidor ni sus volúmenes sigan existiendo.
+
+### 10.2 Manifiesto de cada pedido
+`data/predictions/pedido_<clave>.json` registra el commit del código (y si `src/`, `dags/`, `config/` o `params.yaml` tenían cambios sin confirmar), la versión del modelo y las huellas MD5 del modelo exportado, de los datos crudos, de las features y del propio pedido. No incluye la hora de generación: re-ejecutar la tarea produce el mismo archivo (idempotencia).
+
+### 10.3 DVC dentro de los contenedores
+- El repo se monta en `/opt/airflow` (punteros `.dvc`, `.dvc/` con la caché, `models/`) y `.git` **en solo lectura**, solo para leer el commit.
+- DVC corre con `core.no_scm = true` (configuración global de la imagen, `docker/airflow/dvc-global/config`): **nunca modifica el índice ni el historial de git del host**.
+- El remoto se monta en la misma ruta que tiene en `.dvc/config`, tomada de `DVC_REMOTO` en `.env`. Si no está montado (un clon nuevo, por ejemplo), `dvc push` crearía el directorio dentro del contenedor y los datos se perderían; por eso `versionar` lo verifica antes, deja los datos en la caché local y lo informa en el log sin fallar (situación esperada).
+
+### 10.4 Commit de los punteros en git: paso humano
+Los `.dvc` actualizados quedan como cambios en el árbol de trabajo. Se confirman en una rama con Pull Request, como el resto del trabajo (`CLAUDE.md`).
+- **Alternativa descartada:** que Airflow haga commit y push a git. Escribiría en `main` sin revisión, o necesitaría credenciales de GitHub dentro de los contenedores.
+
+### 10.5 Reproducir un pedido pasado
+```bash
+git checkout <commit con los punteros .dvc de esa publicación>
+dvc checkout            # o dvc pull, si los datos no están en la caché local
+python scripts/reproducir_pedido.py --clave 2017-07-31
+```
+`inventario.reproduccion` comprueba que las features, los datos crudos y el modelo coincidan con las huellas del manifiesto, vuelve a pronosticar y compara el pedido regenerado byte a byte con el publicado. No usa MLflow ni la bandeja.

@@ -44,9 +44,13 @@ def test_existen_los_cuatro_dags(dagbag):
     [
         ("01_ingesta_y_validacion", ["resolver_fecha", "ingestar", "validar", "disparar_preparacion_features"]),
         ("02_preparacion_y_features", ["resolver_fecha", "construir_features", "disparar_pronostico"]),
-        ("03_pronostico_y_pedido", ["resolver_fecha", "asegurar_modelo", "pronosticar_y_generar_pedido"]),
-        ("05_entrenamiento_modelo", ["resolver_fecha", "hay_que_entrenar", "entrenar_y_decidir"]),
-        ("04_seguimiento_desempeno", ["resolver_fecha", "evaluar_pedidos_publicados"]),
+        ("03_pronostico_y_pedido", [
+            "resolver_fecha", "asegurar_modelo", "exportar_modelo", "pronosticar_y_generar_pedido", "versionar",
+        ]),
+        ("05_entrenamiento_modelo", [
+            "resolver_fecha", "hay_que_entrenar", "entrenar_y_decidir", "exportar_modelo", "versionar",
+        ]),
+        ("04_seguimiento_desempeno", ["resolver_fecha", "evaluar_pedidos_publicados", "versionar"]),
     ],
 )
 def test_tareas_en_orden(dagbag, dag_id, tareas):
@@ -87,12 +91,26 @@ def test_tareas_que_entrenan_usan_el_pool_de_un_slot(dagbag, dag_id, task_id):
     assert dagbag.dags[dag_id].get_task(task_id).pool == "entrenamiento"
 
 
-def test_compose_crea_el_pool_de_entrenamiento_con_un_slot():
+@pytest.mark.parametrize("dag_id", ["03_pronostico_y_pedido", "04_seguimiento_desempeno", "05_entrenamiento_modelo"])
+def test_versionado_con_dvc_al_final_y_en_el_pool_de_un_slot(dagbag, dag_id):
+    dag = dagbag.dags[dag_id]
+    tarea = dag.get_task("versionar")
+    assert tarea.pool == "versionado"
+    assert not tarea.downstream_list  # es lo último: versiona lo que el DAG ya escribió
+
+
+def test_pedido_usa_el_modelo_exportado(dagbag):
+    dag = dagbag.dags["03_pronostico_y_pedido"]
+    assert "exportar_modelo" in dag.get_task("pronosticar_y_generar_pedido").upstream_task_ids
+
+
+@pytest.mark.parametrize("pool", ["entrenamiento", "versionado"])
+def test_compose_crea_los_pools_de_un_slot(pool):
     import yaml
 
     compose = yaml.safe_load((DAGS.parent / "docker-compose.yaml").read_text(encoding="utf-8"))
     comando = " ".join(compose["services"]["airflow-init"]["command"])
-    assert "airflow pools set entrenamiento 1" in comando
+    assert f"airflow pools set {pool} 1" in comando
 
 
 def test_tareas_no_usan_claves_reservadas_del_contexto(dagbag):
