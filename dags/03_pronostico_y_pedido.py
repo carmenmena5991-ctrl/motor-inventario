@@ -3,10 +3,14 @@
 1. `asegurar_modelo`: toma la versión con alias @Champions; si todavía no existe (primer
    arranque de un clon nuevo), entrena una con lo entregado hasta ds. Así el pronóstico no
    depende de ningún paso manual.
-2. `pronosticar_y_generar_pedido`: carga ESA versión, pronostica los próximos días
+2. `exportar_modelo`: copia esa versión a models/<nombre>/v<versión>/ (rastreado por DVC).
+3. `pronosticar_y_generar_pedido`: carga ESA copia, pronostica los próximos días
    (`parametros_pedido.horizonte_dias` de config/costos.yaml) a partir de
    data/processed/<ds>/features.parquet y guarda data/predictions/pedido_<ds>.csv, con la
-   columna `modelo_version` (se sobrescribe por fecha: idempotente).
+   columna `modelo_version` (se sobrescribe por fecha: idempotente), y su manifiesto
+   pedido_<ds>.json (commit del código, modelo y huellas de las entradas).
+4. `versionar`: `dvc add` de datos, pedidos y modelos, y `dvc push` si el remoto está
+   montado (DECISIONES.md, sección 10).
 
 Lo dispara el DAG 02 con conf={"ds": ...}. Un solo run a la vez, para que dos backfills
 no entrenen en paralelo el modelo inicial. El servidor MLflow se toma de
@@ -66,29 +70,54 @@ def pronostico_y_pedido():
         return version
 
     @task
-    def pronosticar_y_generar_pedido(fecha: str, conocimiento: str, version: str) -> str:
+    def exportar_modelo(version: str) -> str:
+        from inventario.versionado import exportar_modelo as exportar
+
+        # models/<nombre>/v<versión>/: copia rastreada por DVC; no se re-descarga si ya existe.
+        return str(exportar(version))
+
+    @task
+    def pronosticar_y_generar_pedido(fecha: str, conocimiento: str, version: str, ruta_modelo: str) -> str:
         import pandas as pd
 
         from inventario.almacen import cargar_tabla
+        from inventario.entrenar import MODELO_REGISTRADO_DEFAULT
         from inventario.orquestacion import rutas
         from inventario.predecir import (
-            cargar_modelo_champions,
+            cargar_modelo_local,
             generar_pedido,
             guardar_pedido,
             pronosticar_desde_features,
         )
+        from inventario.versionado import guardar_manifiesto, manifiesto_pedido
 
         r = rutas(fecha, conocimiento=conocimiento or None)
         corte = pd.Timestamp(fecha)
         features = cargar_tabla(r.features)
-        modelo = cargar_modelo_champions(version=version)
+        # Se usa la copia exportada (la que versiona DVC), no la del servidor MLflow.
+        modelo = cargar_modelo_local(ruta_modelo)
         pronostico = pronosticar_desde_features(modelo, features, corte)
         # Un reproceso escribe pedido_<ds>__conocimiento_<fecha>.csv: el publicado no cambia.
         pedido = generar_pedido(pronostico, corte, modelo_version=version)
-        return str(guardar_pedido(pedido, corte, ruta=r.pedido))
+        guardar_pedido(pedido, corte, ruta=r.pedido)
+        guardar_manifiesto(manifiesto_pedido(r, MODELO_REGISTRADO_DEFAULT, version, ruta_modelo), r.manifiesto)
+        return str(r.pedido)
+
+    # DVC usa un bloqueo por repositorio: un solo versionado a la vez entre los DAGs 03, 04 y 05.
+    @task(pool="versionado")
+    def versionar(_pedido: str) -> dict:
+        from dataclasses import asdict
+
+        from inventario.versionado import versionar_con_dvc
+
+        resultado = versionar_con_dvc()
+        log.info("Versionado con DVC: %s", resultado)
+        return asdict(resultado)
 
     fecha = resolver_fecha()
-    pronosticar_y_generar_pedido(fecha["ds"], fecha["conocimiento"], asegurar_modelo(fecha["ds"]))
+    version = asegurar_modelo(fecha["ds"])
+    pedido = pronosticar_y_generar_pedido(fecha["ds"], fecha["conocimiento"], version, exportar_modelo(version))
+    versionar(pedido)
 
 
 pronostico_y_pedido()

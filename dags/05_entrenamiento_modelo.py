@@ -89,8 +89,28 @@ def entrenamiento_modelo():
         log.info("Resultado del entrenamiento: %s", resumen)
         return resumen
 
+    @task
+    def exportar_modelo(resumen: dict) -> str:
+        from inventario.versionado import exportar_modelo as exportar
+
+        # Todo candidato registrado queda en models/ (promovido o no): la decisión es auditable
+        # también desde DVC, no solo desde MLflow.
+        return str(exportar(resumen["version_candidata"]))
+
+    @task(pool="versionado")
+    def versionar(_modelo: str) -> dict:
+        from dataclasses import asdict
+
+        from inventario.versionado import versionar_con_dvc
+
+        resultado = versionar_con_dvc()
+        log.info("Versionado con DVC: %s", resultado)
+        return asdict(resultado)
+
     fecha = resolver_fecha()
-    hay_que_entrenar(fecha) >> entrenar_y_decidir(fecha)
+    resumen = entrenar_y_decidir(fecha)
+    hay_que_entrenar(fecha) >> resumen
+    versionar(exportar_modelo(resumen))
 
 
 entrenamiento_modelo()

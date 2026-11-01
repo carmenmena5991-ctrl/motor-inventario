@@ -46,6 +46,19 @@ x-airflow-comun: &airflow-comun
     - ./data:/opt/airflow/data
     - ./bandeja_origen:/opt/airflow/bandeja_origen:ro
     - ./logs:/opt/airflow/logs
+    # Versionado con DVC desde los DAGs (DECISIONES.md, sección 10). /opt/airflow actúa como
+    # raíz del repositorio: punteros .dvc, caché y modelos exportados son los del host.
+    - ./models:/opt/airflow/models
+    - ./models.dvc:/opt/airflow/models.dvc
+    - ./.dvc:/opt/airflow/.dvc
+    - ./.dvcignore:/opt/airflow/.dvcignore:ro
+    # Solo lectura: para anotar en cada manifiesto el commit del código. DVC corre sin SCM
+    # (docker/airflow/dvc-global/config), así que nunca toca el índice de git del host.
+    - ./.git:/opt/airflow/.git:ro
+    # Remoto de DVC montado en la MISMA ruta que tiene en .dvc/config. Se define en .env
+    # (DVC_REMOTO=/ruta/al/remoto). Sin él, los datos quedan en la caché local y la tarea
+    # `versionar` lo informa sin fallar.
+    - ${DVC_REMOTO:-/tmp/motor-inventario-sin-remoto-dvc}:${DVC_REMOTO:-/tmp/motor-inventario-sin-remoto-dvc}
   depends_on: &airflow-depende
     postgres:
       condition: service_healthy
@@ -109,13 +122,14 @@ services:
 
   airflow-init:
     <<: *airflow-comun
-    # `pools set` es idempotente: crea o actualiza el pool de entrenamiento (1 slot).
+    # `pools set` es idempotente: crea o actualiza los pools de 1 slot.
     command:
       - bash
       - -c
       - >-
         airflow db migrate &&
-        airflow pools set entrenamiento 1 "Un entrenamiento a la vez (~1.6 GiB c/u)"
+        airflow pools set entrenamiento 1 "Un entrenamiento a la vez (~1.6 GiB c/u)" &&
+        airflow pools set versionado 1 "Una operación de DVC a la vez (bloqueo del repositorio)"
     restart: "no"
     depends_on:
       postgres:

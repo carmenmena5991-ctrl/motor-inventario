@@ -6,7 +6,8 @@ el costo real de inventario (quiebres y merma según config/costos.yaml).
 
 En la fecha ds se evalúan los pedidos emitidos en los `evaluacion.dias_historicos_comparar`
 días que terminan en ds - horizonte, que son los que ya tienen todo su horizonte observado.
-El resumen se guarda en data/predictions/seguimiento_<ds>.csv (sobrescribe por fecha).
+El resumen se guarda en data/predictions/seguimiento_<ds>.csv (sobrescribe por fecha) y se
+versiona con DVC (tarea `versionar`).
 
 Programación: diaria a las 07:00, después del DAG 01, con la misma semántica de ds.
 Si la bandeja todavía no tiene ventas de ds, el run se omite (skipped).
@@ -68,7 +69,18 @@ def seguimiento_desempeno():
         log.info("Seguimiento a %s:\n%s", fecha, resultado.to_string(index=False))
         return str(r.seguimiento)
 
-    evaluar_pedidos_publicados(resolver_fecha())
+    # Mismo pool que los DAGs 03 y 05: DVC no admite dos operaciones a la vez en el repo.
+    @task(pool="versionado")
+    def versionar(_seguimiento: str | None) -> dict:
+        from dataclasses import asdict
+
+        from inventario.versionado import versionar_con_dvc
+
+        resultado = versionar_con_dvc()
+        log.info("Versionado con DVC: %s", resultado)
+        return asdict(resultado)
+
+    versionar(evaluar_pedidos_publicados(resolver_fecha()))
 
 
 seguimiento_desempeno()
