@@ -219,4 +219,45 @@ Resultado: IDÉNTICO
 
 ## 6. Capturas de la interfaz
 
-Las capturas de la UI de Airflow (*Grid* de los DAGs) y de MLflow (comparación de runs y Model Registry) van en `docs/img/`.
+Capturas tomadas el 2026-11-01, después de la corrida del periodo. La UI de Airflow muestra las ejecuciones ordenadas por fecha de creación, no por `ds`, así que en cada DAG se ven las más recientes. Eso mezcla runs del backfill con runs programados y manuales.
+
+### Airflow
+
+**Los 5 DAGs activos** (programados: 05 a las 05:00, 01 a las 06:00 y 04 a las 07:00; el 02 y el 03 se disparan en cadena).
+
+![DAGs en Airflow](img/airflow-dags.png)
+
+Las dos barras rojas del DAG 01 son dos ejecuciones **manuales** del 2026-10-31 (23:02 y 23:13 UTC), anteriores a esta evidencia, que fallaron en `ingestar` durante el desarrollo de la bandeja por entregas. En la corrida del periodo no falló ninguna tarea (sección 1).
+
+**DAG 01: ingesta y validación**, con el Grid filtrado por tipo de ejecución *Backfill*.
+
+![Grid del DAG 01, solo backfill](img/airflow-grid-01.png)
+
+- **Grid (izquierda):** los últimos 10 días del periodo, `ds` del 2017-08-06 al 2017-08-15. La segunda columna, en rosa, es el **ds 2017-08-07**: sus ventas llegaron tarde (incidencia simulada), así que `ingestar` se omite (*skipped*), `validar` y el disparo del DAG 02 también, y ese día no se emite pedido. Los otros 9 días terminaron en verde.
+- **Resumen (derecha):** no se filtra con el Grid y muestra las últimas 24 horas. Por eso aparecen los dos runs manuales fallidos del 2026-10-31 descritos arriba.
+
+**DAG 03: pronóstico y pedido.** Las 5 tareas en verde en cada run: `asegurar_modelo`, `exportar_modelo` (copia del modelo a `models/` para DVC), `pronosticar_y_generar_pedido` (pronóstico diario por cuantil y pedido) y `versionar` (`dvc add` + `dvc push`). Hay 0 tareas y 0 ejecuciones fallidas.
+
+![Grid del DAG 03](img/airflow-grid-03.png)
+
+**DAG 05: entrenamiento.** `hay_que_entrenar` corre todos los días. `entrenar_y_decidir`, `exportar_modelo` y `versionar` solo corren el día de reentrenamiento (en verde). Los demás días quedan omitidos por el *short-circuit* (en rosa). Hay 0 tareas fallidas.
+
+![Grid del DAG 05](img/airflow-grid-05.png)
+
+### MLflow
+
+**Comparación baseline vs. HGB** (entrenamiento con corte 2017-07-02). En la misma ventana de validación, HGB cuesta 4,450,921 frente a 10,728,587 del baseline (RMSE 234.9 frente a 530.2). Solo HGB tiene métricas de calibración, porque el baseline estima un único valor.
+
+![Comparación de runs en MLflow](img/mlflow-comparacion.png)
+
+**Calibración del candidato HGB** en esa ventana: cobertura de cada cuantil, del intervalo p10–p90 (0.918) y ancho medio del intervalo.
+
+![Métricas del run HGB](img/mlflow-calibracion.png)
+
+**Model Registry.** v24 tiene el alias `@Champions` (`decision: promovido`, *"no hay modelo vigente"*). v25 a v27 quedaron como `no_promovido`, con el motivo y la versión vigente contra la que se compararon. Todas tienen `cuantiles: p10,p50,p71,p90`.
+
+![Model Registry](img/mlflow-registro.png)
+
+**Versión 24**, la vigente de los 43 pedidos del periodo.
+
+![Versión 24 del modelo](img/mlflow-v24.png)
