@@ -18,6 +18,7 @@
 
 ## 4. Promoción y Registro de Modelo Campeón
 - Se registran ejecuciones en MLflow clasificando modelos. El modelo óptimo se promueve dinámicamente asignándole el alias `@Champions`, permitiendo a los DAGs de Airflow consumirlo sin modificar código.
+- El criterio explícito de reemplazo y la elección del modelo de cada pedido están en la sección 9.
 
 ## 5. Infraestructura (Docker Compose)
 - **MLflow 3.17.2 en servidor y cliente:** el cliente (entrenamiento y Airflow) usa la API de modelos de MLflow 3; un servidor 2.x no la soporta. Las versiones se fijan iguales en `docker/airflow/requirements.txt`.
@@ -26,6 +27,11 @@
 - **Airflow 3 con componentes separados** (`api-server`, `scheduler`, `dag-processor`) sobre Postgres y `LocalExecutor`. El comando `webserver` y `SequentialExecutor` ya no existen en Airflow 3.
 - **Mismas versiones de librerías al entrenar y al predecir:** el modelo se serializa con `skops` y debe cargarse con la misma versión de scikit-learn con la que se entrenó.
 - **Historia de entrenamiento acotada** (`--dias-historia`): con el dataset completo (3 M filas) y 6 GB de RAM se entrena con el último año para limitar memoria y tiempo.
+- **Presupuesto de memoria (WSL ~6.6 GiB).** El primer backfill del DAG 05 (2017-07-02 a 07-17) agotó la memoria y tumbó WSL. Un `airflow backfill create` usa su propio `--max-active-runs` (10 por defecto), no el `max_active_runs=1` del DAG, y todos los runs entrenaban a la vez porque aún no había modelo vigente. Medido: **un entrenamiento usa ~1.6 GiB de pico y tarda ~40 s**; en paralelo se roban CPU y memoria y no terminan. Medidas:
+  - **Pool `entrenamiento` de 1 slot** (lo crea `airflow-init` con `airflow pools set`, idempotente) para `05.entrenar_y_decidir` y `03.asegurar_modelo`: nunca corren dos entrenamientos a la vez, venga el run de un backfill, del calendario o de una ejecución manual.
+  - **`mem_limit` por contenedor:** scheduler 3.5 GiB (con `LocalExecutor` las tareas corren dentro de él), api-server y dag-processor 1 GiB, MLflow 1 GiB. Si alguno se excede, Docker mata ese contenedor y no WSL entero. `AIRFLOW__CORE__PARALLELISM=4` en el scheduler.
+  - **MLflow sin ejecutor de jobs** (`MLFLOW_SERVER_ENABLE_JOB_EXECUTION=false`) y con `--workers 2`: en reposo ocupaba 2.2 GiB, casi todo de 7 procesos `huey_consumer` para jobs de GenAI/evaluación que este proyecto no usa. Queda en ~0.55 GiB.
+  - Los backfills que entrenan se lanzan con `--max-active-runs 1`.
 
 ## 6. Operación de los DAGs
 - **Sin datos del día, el run se omite:** si la bandeja todavía no tiene ventas de la fecha lógica, los DAGs 01 y 04 terminan con la tarea omitida (*skipped*) en lugar de procesar datos viejos como si fueran del día. Así 01 y 04 pueden estar activos aunque la bandeja contenga datos históricos. En producción esto significa que, si los datos llegan tarde, ese día no se emite pedido: conviene vigilar los runs omitidos.
@@ -135,3 +141,24 @@ El seguimiento al 2017-08-15 de los 14 pedidos emitidos del 26-jul al 8-ago (mod
 - **Detener el run ante un archivo inválido:** como cada run lee todas las entregas anteriores, un solo archivo corrupto habría hecho fallar todos los runs futuros. La cuarentena aísla el archivo y deja continuar.
 - **Sobrescribir el pedido publicado al llegar una corrección:** se perdería la reproducibilidad de lo que realmente se entregó al negocio.
 - **Esperar las ventas tardías con un sensor:** bloquearía el slot del DAG por un tiempo indefinido; se prefirió omitir el run y que el día siguiente use los datos que hayan llegado.
+
+## 9. Entrenamiento y criterio de reemplazo del modelo vigente
+### 9.1 Cuándo se entrena (DAG `05_entrenamiento_modelo`)
+- Corre a diario a las 05:00 (antes del DAG 01) y entrena solo si **no hay modelo vigente a `ds`** o si `ds` es el **día de reentrenamiento** (`entrenamiento.dia_reentrenamiento` en `params.yaml`, domingo por defecto). Los demás días se corta con un *short-circuit*.
+- Usa solo lo entregado en la bandeja hasta `ds` y los últimos `entrenamiento.dias_historia` días (365). Si las ventas de `ds` aún no llegaron, el entrenamiento se omite, como el resto del flujo.
+- **Arranque sin pasos manuales:** el DAG 03 tiene la tarea `asegurar_modelo`; si no existe un modelo vigente a `ds` (clon nuevo, o backfill anterior a todo entrenamiento), entrena uno en ese momento con los datos hasta `ds`.
+- **Alternativas descartadas:** reentrenar a diario (más costo y cambios de modelo por ruido sin beneficio claro en una semana de datos nuevos) o entrenar solo a mano (rompe la operación sin intervención manual).
+
+### 9.2 Criterio explícito de reemplazo
+1. Baseline y ML se entrenan y validan con el **mismo esquema temporal**: los últimos `evaluacion.dias_historicos_comparar` días (14) quedan fuera del entrenamiento. El de menor costo total de inventario es el **candidato**.
+2. El **modelo vigente** se evalúa en **esa misma ventana**. Ninguno de los dos la usó para entrenar: el vigente se entrenó con datos anteriores.
+3. El candidato **reemplaza al vigente solo si su costo es al menos `promocion.mejora_minima` (2 %) menor**. Si no hay vigente, o el vigente ya no se puede evaluar con las features actuales, el candidato se promueve.
+4. Cada candidato se registra en MLflow, aunque no se promueva, con las etiquetas `decision` (`promovido` / `no_promovido`), `motivo`, `fecha_corte` y la versión vigente contra la que se comparó. Queda la auditoría de todas las decisiones.
+
+**¿Por qué un umbral del 2 %?** Dos entrenamientos con datos casi iguales dan costos que difieren por ruido. Sin umbral, el modelo cambiaría cada semana sin una mejora real, y cada cambio dificulta comparar el seguimiento entre semanas. El 2 % es pequeño frente a las diferencias que importan: el cambio de cuantil de la sección 7 redujo el costo un 23 %.
+
+### 9.3 Qué modelo usa cada pedido (selección por fecha)
+- El DAG 03 no toma "el `@Champions` de ahora", sino el **modelo vigente a `ds`**: la última versión promovida con `fecha_corte <= ds`. Así un pedido usa el modelo que existía al emitirlo, aunque los backfills de los DAGs 05 y 01 se ejecuten en otro orden, y reprocesar una fecha da el mismo resultado.
+- El pedido guarda la columna `modelo_version`, que lo liga a la versión exacta que lo produjo.
+- `@Champions` apunta siempre al último modelo promovido y **nunca retrocede**: si un backfill entrena un modelo para una fecha antigua, el alias no se mueve hacia él.
+- Las versiones registradas antes de este criterio (sin etiqueta `decision`) no se consideran vigentes.

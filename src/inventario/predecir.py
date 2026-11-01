@@ -27,10 +27,13 @@ def cargar_modelo_champions(
     nombre_modelo: str = MODELO_REGISTRADO_DEFAULT,
     alias: str = ALIAS_CAMPEON,
     tracking_uri: str | None = None,
+    version: str | None = None,
 ):
-    """Descarga desde MLflow la versión del modelo que tiene el alias indicado."""
+    """Descarga desde MLflow el modelo con el alias indicado o, si se da `version`, esa
+    versión exacta (para que el pedido quede ligado a la versión que lo produjo)."""
     mlflow.set_tracking_uri(resolver_tracking_uri(tracking_uri))
-    return mlflow.pyfunc.load_model(f"models:/{nombre_modelo}@{alias}")
+    referencia = f"models:/{nombre_modelo}/{version}" if version else f"models:/{nombre_modelo}@{alias}"
+    return mlflow.pyfunc.load_model(referencia)
 
 
 def crear_filas_futuras(
@@ -102,12 +105,15 @@ def pronosticar(
     return pronosticar_desde_features(modelo, features, datos.fecha_corte)
 
 
-def generar_pedido(pronostico: pd.DataFrame, fecha_corte: pd.Timestamp) -> pd.DataFrame:
+def generar_pedido(
+    pronostico: pd.DataFrame, fecha_corte: pd.Timestamp, modelo_version: str | None = None
+) -> pd.DataFrame:
     """Pedido sugerido por tienda y familia = suma del pronóstico del horizonte, redondeada
     hacia arriba a unidades enteras.
 
     Sumar cuantiles diarios da una cobertura algo mayor que el cuantil de la demanda total
     (supuesto conservador ante quiebres, que cuestan más que la merma).
+    Si se indica `modelo_version`, se agrega como columna para rastrear qué modelo lo produjo.
     """
     pedido = (
         pronostico.groupby(CLAVES, as_index=False)
@@ -115,6 +121,8 @@ def generar_pedido(pronostico: pd.DataFrame, fecha_corte: pd.Timestamp) -> pd.Da
     )
     pedido["pedido_sugerido"] = np.ceil(pedido["pronostico_horizonte"].round(6)).astype(int)
     pedido.insert(0, "fecha_emision", fecha_corte.date())
+    if modelo_version is not None:
+        pedido["modelo_version"] = str(modelo_version)
     return pedido
 
 

@@ -1,0 +1,18 @@
+# Parámetros de entrenamiento y de promoción del modelo (ver DECISIONES.md, sección 9).
+# Los costos de negocio y el cuantil objetivo están en config/costos.yaml.
+
+entrenamiento:
+  dias_historia: 365          # días de ventas usados para entrenar (acota memoria y tiempo)
+  dia_reentrenamiento: 6      # día de la semana en que el DAG 05 reentrena (0 = lunes ... 6 = domingo)
+  hiperparametros:            # HistGradientBoostingRegressor
+    max_iter: 300
+    learning_rate: 0.05
+    max_leaf_nodes: 31
+    min_samples_leaf: 20
+    l2_regularization: 0.0
+    random_state: 42
+
+promocion:
+  # Un candidato reemplaza al modelo vigente (@Champions) solo si, en la misma ventana de
+  # validación, su costo total de inventario es al menos este porcentaje menor.
+  mejora_minima: 0.02

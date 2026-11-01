@@ -35,6 +35,7 @@ def test_existen_los_cuatro_dags(dagbag):
         "02_preparacion_y_features",
         "03_pronostico_y_pedido",
         "04_seguimiento_desempeno",
+        "05_entrenamiento_modelo",
     }
 
 
@@ -43,7 +44,8 @@ def test_existen_los_cuatro_dags(dagbag):
     [
         ("01_ingesta_y_validacion", ["resolver_fecha", "ingestar", "validar", "disparar_preparacion_features"]),
         ("02_preparacion_y_features", ["resolver_fecha", "construir_features", "disparar_pronostico"]),
-        ("03_pronostico_y_pedido", ["resolver_fecha", "pronosticar_y_generar_pedido"]),
+        ("03_pronostico_y_pedido", ["resolver_fecha", "asegurar_modelo", "pronosticar_y_generar_pedido"]),
+        ("05_entrenamiento_modelo", ["resolver_fecha", "hay_que_entrenar", "entrenar_y_decidir"]),
         ("04_seguimiento_desempeno", ["resolver_fecha", "evaluar_pedidos_publicados"]),
     ],
 )
@@ -65,6 +67,7 @@ def test_solo_01_y_04_estan_programados(dagbag):
     assert dagbag.dags["03_pronostico_y_pedido"].timetable.can_be_scheduled is False
     assert dagbag.dags["01_ingesta_y_validacion"].timetable.can_be_scheduled
     assert dagbag.dags["04_seguimiento_desempeno"].timetable.can_be_scheduled
+    assert dagbag.dags["05_entrenamiento_modelo"].timetable.can_be_scheduled
 
 
 # Claves del contexto de Airflow que una tarea TaskFlow no puede recibir como argumento
@@ -74,6 +77,22 @@ CLAVES_RESERVADAS = {
     "data_interval_end", "params", "ti", "task_instance", "dag_run", "dag", "run_id",
     "conf", "macros", "var", "conn", "inlets", "outlets", "task", "triggering_asset_events",
 }
+
+
+@pytest.mark.parametrize(
+    "dag_id, task_id",
+    [("05_entrenamiento_modelo", "entrenar_y_decidir"), ("03_pronostico_y_pedido", "asegurar_modelo")],
+)
+def test_tareas_que_entrenan_usan_el_pool_de_un_slot(dagbag, dag_id, task_id):
+    assert dagbag.dags[dag_id].get_task(task_id).pool == "entrenamiento"
+
+
+def test_compose_crea_el_pool_de_entrenamiento_con_un_slot():
+    import yaml
+
+    compose = yaml.safe_load((DAGS.parent / "docker-compose.yaml").read_text(encoding="utf-8"))
+    comando = " ".join(compose["services"]["airflow-init"]["command"])
+    assert "airflow pools set entrenamiento 1" in comando
 
 
 def test_tareas_no_usan_claves_reservadas_del_contexto(dagbag):

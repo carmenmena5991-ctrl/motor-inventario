@@ -23,7 +23,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--fecha-corte", required=True, help="Última fecha de datos usable (YYYY-MM-DD)")
     parser.add_argument("--bandeja", type=Path, default=RAIZ / "bandeja_origen")
-    parser.add_argument("--dias-historia", type=int, default=None, help="Días de historia a usar (por defecto, todos)")
+    parser.add_argument("--dias-historia", type=int, default=None,
+                        help="Días de historia a usar (por defecto, entrenamiento.dias_historia de params.yaml)")
     parser.add_argument("--experimento", default="motor_inventario")
     parser.add_argument("--nombre-modelo", default="motor_inventario")
     args = parser.parse_args()
@@ -35,9 +36,13 @@ def main() -> None:
         experimento=args.experimento,
         nombre_modelo=args.nombre_modelo,
     )
-    print(f"Ganador: {resultado.ganador} (versión {resultado.version}, run {resultado.run_id})")
+    print(f"Candidato: {resultado.ganador} (versión {resultado.version}, run {resultado.run_id})")
     for modelo, metricas in resultado.metricas.items():
         print(f"  {modelo}: " + ", ".join(f"{k}={v:,.2f}" for k, v in metricas.items()))
+    vigente = f"versión {resultado.version_vigente}" if resultado.version_vigente else "ninguno"
+    costo = f", costo {resultado.costo_vigente:,.2f}" if resultado.costo_vigente is not None else ""
+    print(f"Vigente al entrenar: {vigente}{costo}")
+    print(f"Decisión: {'PROMOVIDO a @Champions' if resultado.promovido else 'no promovido'} ({resultado.motivo})")
 
 
 if __name__ == "__main__":
