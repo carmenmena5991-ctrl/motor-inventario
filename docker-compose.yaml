@@ -43,24 +43,29 @@ x-airflow-comun: &airflow-comun
     MLFLOW_TRACKING_URI: http://mlflow:5000
     INVENTARIO_DIR: /opt/airflow
     PYTHONPATH: /opt/airflow/src
+    # Raíz del repositorio dentro del contenedor (DVC, commit del código y params.yaml).
+    INVENTARIO_REPO: /opt/airflow/repo
+    INVENTARIO_PARAMS: /opt/airflow/repo/params.yaml
+    GIT_CONFIG_VALUE_0: /opt/airflow/repo   # safe.directory (docker/airflow/Dockerfile)
+  # Solo carpetas, nunca archivos sueltos: Docker monta un archivo por su inodo, y cuando el
+  # host lo reemplaza (un editor, git checkout, git pull) el contenedor sigue viendo el viejo
+  # y lo que escribe en él no llega al host (DECISIONES.md, sección 10.3).
   volumes:
     - ./dags:/opt/airflow/dags
     - ./src:/opt/airflow/src
     - ./config:/opt/airflow/config
-    - ./params.yaml:/opt/airflow/params.yaml:ro
     - ./scripts:/opt/airflow/scripts:ro       # ejecutar_periodo.py (make periodo)
     - ./data:/opt/airflow/data
     - ./bandeja_origen:/opt/airflow/bandeja_origen:ro
     - ./logs:/opt/airflow/logs
-    # Versionado con DVC desde los DAGs (DECISIONES.md, sección 10). /opt/airflow actúa como
-    # raíz del repositorio: punteros .dvc, caché y modelos exportados son los del host.
     - ./models:/opt/airflow/models
-    - ./models.dvc:/opt/airflow/models.dvc
-    - ./.dvc:/opt/airflow/.dvc
-    - ./.dvcignore:/opt/airflow/.dvcignore:ro
-    # Solo lectura: para anotar en cada manifiesto el commit del código. DVC corre sin SCM
-    # (docker/airflow/dvc-global/config), así que nunca toca el índice de git del host.
-    - ./.git:/opt/airflow/.git:ro
+    # Versionado con DVC desde los DAGs (sección 10): el repositorio completo, con sus
+    # punteros .dvc, la caché .dvc/ y params.yaml. Son los mismos archivos que data/ y
+    # models/ de arriba, vistos desde la raíz del repo.
+    - .:/opt/airflow/repo
+    # .git en solo lectura: solo para anotar en cada manifiesto el commit del código. DVC
+    # corre sin SCM (docker/airflow/dvc-global/config) y nunca toca el índice del host.
+    - ./.git:/opt/airflow/repo/.git:ro
     # Remoto de DVC montado en la MISMA ruta que tiene en .dvc/config. Se define en .env
     # (DVC_REMOTO=/ruta/al/remoto). Sin él, los datos quedan en la caché local y la tarea
     # `versionar` lo informa sin fallar.

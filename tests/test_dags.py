@@ -110,6 +110,24 @@ def _compose() -> dict:
     return yaml.safe_load((DAGS.parent / "docker-compose.yaml").read_text(encoding="utf-8"))
 
 
+def test_compose_no_monta_archivos_sueltos():
+    """Docker monta un archivo por su inodo: si el host lo reemplaza (editor, git checkout),
+    el contenedor sigue viendo el viejo y lo que escribe no llega al host. Solo carpetas."""
+    compose = _compose()
+    montajes = list(compose["x-airflow-comun"]["volumes"])
+    for servicio in compose["services"].values():
+        montajes += [m for m in servicio.get("volumes", []) if isinstance(m, str)]
+    for montaje in montajes:
+        fuente = montaje.split(":")[0]
+        if fuente.startswith("."):
+            assert not (DAGS.parent / fuente).is_file(), f"montaje de archivo suelto: {montaje}"
+    entorno = compose["x-airflow-comun"]["environment"]
+    assert entorno["INVENTARIO_PARAMS"] == "/opt/airflow/repo/params.yaml"
+    assert entorno["INVENTARIO_REPO"] == "/opt/airflow/repo"
+    assert ".:/opt/airflow/repo" in compose["x-airflow-comun"]["volumes"]
+    assert "./.git:/opt/airflow/repo/.git:ro" in compose["x-airflow-comun"]["volumes"]
+
+
 def test_dags_activos_desde_el_primer_arranque():
     entorno = _compose()["x-airflow-comun"]["environment"]
     assert entorno["AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION"] == "false"
