@@ -104,6 +104,30 @@ def test_pedido_usa_el_modelo_exportado(dagbag):
     assert "exportar_modelo" in dag.get_task("pronosticar_y_generar_pedido").upstream_task_ids
 
 
+def _compose() -> dict:
+    import yaml
+
+    return yaml.safe_load((DAGS.parent / "docker-compose.yaml").read_text(encoding="utf-8"))
+
+
+def test_dags_activos_desde_el_primer_arranque():
+    entorno = _compose()["x-airflow-comun"]["environment"]
+    assert entorno["AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION"] == "false"
+
+
+def test_airflow_arranca_despues_de_preparar_directorios_y_bandeja():
+    servicios = _compose()["services"]
+    assert servicios["airflow-init"]["depends_on"]["preparar-bandeja"]["condition"] == "service_completed_successfully"
+    assert servicios["preparar-bandeja"]["depends_on"]["preparar-directorios"]["condition"] == "service_completed_successfully"
+    # El flujo nunca escribe en la bandeja: solo el simulador la genera.
+    montajes = servicios["preparar-bandeja"]["volumes"]
+    assert "./bandeja_origen:/opt/airflow/bandeja_origen" in montajes
+    assert "./bandeja_origen:/opt/airflow/bandeja_origen:ro" in _compose()["x-airflow-comun"]["volumes"]
+    comando = " ".join(servicios["preparar-directorios"]["command"])
+    for directorio in ("logs", "models", "bandeja_origen"):
+        assert directorio in comando
+
+
 @pytest.mark.parametrize("pool", ["entrenamiento", "versionado"])
 def test_compose_crea_los_pools_de_un_slot(pool):
     import yaml
