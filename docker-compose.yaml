@@ -48,6 +48,7 @@ x-airflow-comun: &airflow-comun
     - ./src:/opt/airflow/src
     - ./config:/opt/airflow/config
     - ./params.yaml:/opt/airflow/params.yaml:ro
+    - ./scripts:/opt/airflow/scripts:ro       # ejecutar_periodo.py (make periodo)
     - ./data:/opt/airflow/data
     - ./bandeja_origen:/opt/airflow/bandeja_origen:ro
     - ./logs:/opt/airflow/logs
