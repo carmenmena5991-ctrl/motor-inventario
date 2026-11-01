@@ -1,6 +1,7 @@
 # Simulación del sistema de origen (bandeja_origen/) a partir de los CSV de Kaggle.
 #
-# scripts/preparar_bandeja.py genera un archivo por fuente y fecha de entrega:
+# scripts/preparar_bandeja.py (servicio `preparar-bandeja` de Docker Compose, en cada
+# arranque) genera un archivo por fuente y fecha de entrega:
 #     bandeja_origen/<fuente>/<fuente>_<AAAA-MM-DD>.csv
 # La fecha del nombre es la FECHA DE ENTREGA: el archivo está disponible para el run cuya
 # fecha lógica (ds) es esa fecha. El motor solo usa entregas con fecha <= ds.
@@ -8,7 +9,9 @@
 
 periodo:
   fin_carga_historica: 2017-06-30   # todo lo entregado hasta aquí llega en una carga inicial
-  fin_simulacion: 2017-08-15        # última fecha de entrega simulada
+  # Última fecha de entrega simulada. `auto` = última fecha de ventas de train.csv: si se
+  # reemplaza por uno con un periodo posterior, la bandeja lo cubre sin editar este archivo.
+  fin_simulacion: auto              # o una fecha fija AAAA-MM-DD
 
 semilla: 42                         # mismas incidencias en cada ejecución
 

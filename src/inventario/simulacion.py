@@ -18,7 +18,10 @@ La última versión entregada de cada fila coincide con el dato original de Kagg
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +38,39 @@ ARCHIVOS_ANTIGUOS = ("train.csv", "oil.csv", "holidays_events.csv", "stores.csv"
 def cargar_config_bandeja(ruta: str | Path | None = None) -> dict[str, Any]:
     with open(ruta or RUTA_CONFIG_DEFAULT, encoding="utf-8") as f:
         return yaml.safe_load(f)
+
+
+def verificar_origen(origen: str | Path, config: dict[str, Any]) -> None:
+    """Falla con un mensaje claro si falta algún CSV de Kaggle que pide la configuración."""
+    origen = Path(origen)
+    faltantes = [c["archivo"] for c in config["fuentes"].values() if not (origen / c["archivo"]).is_file()]
+    if faltantes:
+        raise FileNotFoundError(
+            f"Faltan archivos de Kaggle en {origen}: {', '.join(faltantes)}. Descárguelos de "
+            "https://www.kaggle.com/competitions/store-sales-time-series-forecasting/data "
+            "y colóquelos en esa carpeta (ver README.md)."
+        )
+
+
+def resolver_periodo(origen: str | Path, config: dict[str, Any]) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """(fin de la carga histórica, fin de la simulación).
+
+    `fin_simulacion: auto` toma la última fecha de ventas de los datos de origen: si se
+    reemplaza train.csv por uno con un periodo posterior, la bandeja lo cubre sin editar
+    la configuración.
+    """
+    fin_historico = pd.Timestamp(config["periodo"]["fin_carga_historica"])
+    fin = config["periodo"]["fin_simulacion"]
+    if str(fin).strip().lower() == "auto":
+        archivo = Path(origen) / config["fuentes"]["ventas"]["archivo"]
+        fin = pd.to_datetime(pd.read_csv(archivo, usecols=["date"])["date"]).max()
+    fin_simulacion = pd.Timestamp(fin)
+    if fin_simulacion <= fin_historico:
+        raise ValueError(
+            f"El fin de la simulación ({fin_simulacion.date()}) debe ser posterior al fin de la "
+            f"carga histórica ({fin_historico.date()})"
+        )
+    return fin_historico, fin_simulacion
 
 
 def _dia_habil(fechas: pd.Series) -> pd.Series:
@@ -72,8 +108,8 @@ def generar_bandeja(
     """
     config = config or cargar_config_bandeja()
     origen, destino = Path(origen), Path(destino)
-    fin_historico = pd.Timestamp(config["periodo"]["fin_carga_historica"])
-    fin_simulacion = pd.Timestamp(config["periodo"]["fin_simulacion"])
+    verificar_origen(origen, config)
+    fin_historico, fin_simulacion = resolver_periodo(origen, config)
     rng = np.random.default_rng(int(config.get("semilla", 0)))
     incidencias_conf = config.get("incidencias", {}) or {}
     dias_simulados = pd.date_range(fin_historico + pd.Timedelta(days=1), fin_simulacion, freq="D")
@@ -174,3 +210,73 @@ def generar_bandeja(
 
     incidencias_df = pd.DataFrame(incidencias, columns=["tipo", "fuente", "fecha_datos", "fecha_entrega", "filas"])
     return pd.DataFrame(resumen), incidencias_df.sort_values(["fecha_datos", "tipo"]).reset_index(drop=True)
+
+
+# --- Preparación automática al levantar Docker Compose ---------------------------------
+
+ARCHIVO_HUELLA = ".huella_bandeja.json"  # en la raíz de la bandeja; la ingesta lo ignora
+
+
+def huella_entrada(origen: str | Path, config: dict[str, Any]) -> str:
+    """Huella de todo lo que determina la bandeja: la configuración y los CSV de origen."""
+    from inventario.versionado import md5_archivo
+
+    h = hashlib.md5(json.dumps(config, sort_keys=True, default=str).encode())
+    for fuente in sorted(config["fuentes"]):
+        archivo = config["fuentes"][fuente]["archivo"]
+        h.update(f"{archivo}\0{md5_archivo(Path(origen) / archivo)}\n".encode())
+    return h.hexdigest()
+
+
+@dataclass(frozen=True)
+class ResultadoPreparacion:
+    generada: bool
+    huella: str
+    fin_carga_historica: str
+    fin_simulacion: str
+    entregas: pd.DataFrame | None = None
+    incidencias: pd.DataFrame | None = None
+
+
+def preparar_bandeja(
+    origen: str | Path,
+    destino: str | Path,
+    config: dict[str, Any] | None = None,
+    forzar: bool = False,
+) -> ResultadoPreparacion:
+    """Genera la bandeja solo si cambiaron sus entradas (o si `forzar`).
+
+    Se ejecuta en cada `docker compose up`: la primera vez genera la bandeja y las
+    siguientes la deja como está, salvo que cambien los CSV de Kaggle o config/bandeja.yaml.
+    La marca de huella se borra antes de generar y se escribe al terminar, así que una
+    generación interrumpida se repite completa en el siguiente arranque.
+    """
+    config = config or cargar_config_bandeja()
+    origen, destino = Path(origen), Path(destino)
+    verificar_origen(origen, config)
+    huella = huella_entrada(origen, config)
+    fin_historico, fin_simulacion = resolver_periodo(origen, config)
+    marca = destino / ARCHIVO_HUELLA
+    datos_marca = {
+        "huella": huella,
+        "fin_carga_historica": str(fin_historico.date()),
+        "fin_simulacion": str(fin_simulacion.date()),
+    }
+
+    fuentes_presentes = all((destino / fuente).is_dir() for fuente in config["fuentes"])
+    if not forzar and marca.exists() and fuentes_presentes:
+        try:
+            anterior = json.loads(marca.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            anterior = {}
+        if anterior.get("huella") == huella:
+            return ResultadoPreparacion(False, huella, datos_marca["fin_carga_historica"], datos_marca["fin_simulacion"])
+
+    marca.unlink(missing_ok=True)
+    entregas, incidencias = generar_bandeja(origen, destino, config)
+    temporal = marca.with_name(marca.name + ".tmp")
+    temporal.write_text(json.dumps(datos_marca, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(temporal, marca)
+    return ResultadoPreparacion(
+        True, huella, datos_marca["fin_carga_historica"], datos_marca["fin_simulacion"], entregas, incidencias
+    )

@@ -1,9 +1,12 @@
 # Motor de Reposición de Inventario: MLflow 3 + Airflow 3 en la red compartida inventarioNet.
 #
-# Primer arranque:
-#   python scripts/preparar_bandeja.py        # crea bandeja_origen/ desde data/raw_kaggle
-#   mkdir -p logs
-#   docker compose up -d --build
+# Primer arranque (sin otros pasos manuales):
+#   1. Copiar los CSV de Kaggle a data/raw_kaggle/
+#   2. docker compose up -d --build
+# Antes de Airflow corren, una vez por arranque:
+#   preparar-directorios  crea logs/, models/ y bandeja_origen/ con el UID de Airflow
+#   preparar-bandeja      genera bandeja_origen/ desde data/raw_kaggle (solo si cambió)
+# Los DAGs quedan activos; los runs programados sin ventas del día se omiten solos.
 #
 # MLflow:  http://localhost:5000   (desde contenedores: http://mlflow:5000)
 # Airflow: http://localhost:8080   (sin login: todos son admin, solo para uso local)
@@ -30,7 +33,9 @@ x-airflow-comun: &airflow-comun
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    # Activos desde el primer arranque: un clon nuevo opera sin despausar nada a mano. Los
+    # runs programados sin ventas del día se omiten (DECISIONES.md, sección 6).
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
     AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
     # Todos los componentes deben compartir el secreto con el que se firman los tokens.
     AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:-secreto-local-inventario}
@@ -120,6 +125,46 @@ services:
       timeout: 5s
       retries: 10
 
+  # En un clon nuevo no existen logs/, models/ ni bandeja_origen/ (git las ignora o son
+  # salidas de DVC). Si Docker las crea al montarlas, quedan de root y Airflow (que corre con
+  # AIRFLOW_UID) no puede escribir. Este paso, como el airflow-init oficial, corre como root,
+  # las crea con el UID de Airflow y corrige las que hayan quedado de root; no toca las demás.
+  preparar-directorios:
+    <<: *airflow-comun
+    user: "0:0"
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - >-
+        for d in logs models bandeja_origen data data/raw_kaggle; do
+          if [ ! -d "/proyecto/$$d" ] || [ "$$(stat -c %u "/proyecto/$$d")" = 0 ]; then
+            mkdir -p "/proyecto/$$d" && chown "${AIRFLOW_UID:-1000}:0" "/proyecto/$$d" && echo "preparado: $$d";
+          fi;
+        done
+    volumes:
+      - .:/proyecto
+    restart: "no"
+    depends_on: {}
+
+  # Sistema de origen simulado: genera bandeja_origen/ desde data/raw_kaggle/ (Kaggle).
+  # Solo regenera si cambian los CSV o config/bandeja.yaml; si falta un CSV, se detiene con
+  # un mensaje claro y Airflow no arranca (no hay con qué operar).
+  preparar-bandeja:
+    <<: *airflow-comun
+    command: ["python", "/opt/airflow/scripts/preparar_bandeja.py"]
+    environment:
+      PYTHONPATH: /opt/airflow/src
+      CONNECTION_CHECK_MAX_COUNT: "0"  # no espera a la base de Airflow: no la usa
+    volumes:
+      - ./src:/opt/airflow/src:ro
+      - ./scripts:/opt/airflow/scripts:ro
+      - ./config:/opt/airflow/config:ro
+      - ./data:/opt/airflow/data            # lee raw_kaggle/, escribe processed/bandeja_incidencias.csv
+      - ./bandeja_origen:/opt/airflow/bandeja_origen
+    restart: "no"
+    depends_on:
+      preparar-directorios:
+        condition: service_completed_successfully
+
   airflow-init:
     <<: *airflow-comun
     # `pools set` es idempotente: crea o actualiza los pools de 1 slot.
@@ -134,6 +179,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      preparar-bandeja:
+        condition: service_completed_successfully
 
   airflow-apiserver:
     <<: *airflow-comun

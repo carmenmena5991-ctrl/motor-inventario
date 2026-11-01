@@ -39,6 +39,16 @@
 - **Evaluación honesta del seguimiento:** para medir el desempeño de un periodo pasado, el modelo `@Champions` debe estar entrenado solo con datos anteriores a ese periodo.
 - **Remoto de DVC permanente** en `~/product-dev/dvc-storage/motor-inventario` (antes `/tmp/dvc-storage`, que se borra al reiniciar WSL).
 
+### 6.1 Arranque sin intervención manual
+Un clon nuevo solo necesita los CSV de Kaggle en `data/raw_kaggle/` y `docker compose up -d --build`. Antes de Airflow corren dos servicios de un solo uso:
+1. **`preparar-directorios`** (como root, igual que el `airflow-init` oficial): crea `logs/`, `models/` y `bandeja_origen/` con `AIRFLOW_UID`. En un clon no existen (git las ignora o son salidas de DVC); si Docker las creara al montarlas quedarían de root y Airflow no podría escribir logs ni exportar modelos. Solo toca carpetas que faltan o que quedaron de root.
+2. **`preparar-bandeja`**: genera la bandeja con `scripts/preparar_bandeja.py`. Guarda en `bandeja_origen/.huella_bandeja.json` una huella de los CSV de Kaggle y de `config/bandeja.yaml`, y en los arranques siguientes **solo regenera si cambiaron**. Si falta un CSV termina con un mensaje que dice cuál y dónde ponerlo, y Airflow no arranca: sin datos de origen no hay nada que operar.
+
+Además:
+- **DAGs activos al crearse** (`DAGS_ARE_PAUSED_AT_CREATION=false`). Es seguro porque los runs programados sin ventas del día se omiten (punto anterior); antes había que despausarlos a mano.
+- **`fin_simulacion: auto`** en `config/bandeja.yaml`: la bandeja llega hasta la última fecha de ventas de `train.csv`. Si se reemplazan los CSV por unos con un periodo posterior, la bandeja lo cubre sin editar la configuración. Con los datos de Kaggle da exactamente la misma bandeja que la fecha fija 2017-08-15.
+- **Alternativas descartadas:** generar la bandeja dentro de un DAG (el flujo trataría como propio al sistema de origen, que debe ser externo y de solo lectura); regenerarla en cada arranque (unos segundos de trabajo inútil y archivos reescritos sin cambios); un paso manual documentado en el README (es justo lo que se evalúa que no haga falta).
+
 ## 7. Cuantil objetivo: de 0.90 a 0.71
 **Decisión:** `parametros_pedido.cuantil_objetivo` pasa de `0.90` a `0.71` en `config/costos.yaml`.
 
@@ -117,7 +127,7 @@ El seguimiento al 2017-08-15 de los 14 pedidos emitidos del 26-jul al 8-ago (mod
 | feriados (`holidays_events.csv`) | Mensual: el día 1 llega el calendario del mes siguiente | El calendario oficial se publica por adelantado |
 | tiendas (`stores.csv`) | Una vez, en la carga histórica | Catálogo casi estático |
 
-- **Carga histórica inicial:** todo lo entregado hasta `fin_carga_historica` (2017-06-30) llega en un solo archivo por fuente con esa fecha. Del 2017-07-01 al 2017-08-15 hay entregas diarias.
+- **Carga histórica inicial:** todo lo entregado hasta `fin_carga_historica` (2017-06-30) llega en un solo archivo por fuente con esa fecha. Desde el 2017-07-01 hasta la última fecha de ventas de `train.csv` (`fin_simulacion: auto`; con los datos de Kaggle, el 2017-08-15) hay entregas diarias. La bandeja se genera sola al levantar Docker Compose (sección 6.1).
 - **Incidencias** (semilla fija, reproducibles): entregas tardías (5 % de los días de ventas, transacciones y petróleo, 1-3 días extra), correcciones (10 % de los días de ventas; 2 % de sus filas llegan con valor ×0,5-1,5 y el valor real llega 1-5 días después) y entregas corruptas (3 % de los archivos de ventas traen una venta negativa y se reenvían válidos al día siguiente). La última versión entregada de cada fila coincide con el dato de Kaggle.
 - El detalle de cada incidencia simulada queda en `data/processed/bandeja_incidencias.csv`.
 
