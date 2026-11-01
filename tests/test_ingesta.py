@@ -63,3 +63,15 @@ def test_corte_anterior_a_toda_la_historia(bandeja):
 def test_normaliza_fecha_de_airflow_con_zona_horaria():
     assert normalizar_fecha(datetime(2017, 3, 15, 0, 0, tzinfo=timezone.utc)) == pd.Timestamp("2017-03-15")
     assert normalizar_fecha("2017-03-15T10:30:00") == pd.Timestamp("2017-03-15")
+
+
+def test_exigir_ventas_del_dia(bandeja):
+    from inventario.ingesta import DatosNoDisponiblesError, exigir_ventas_del_dia
+
+    datos = leer_bandeja("2017-03-15", bandeja)
+    assert exigir_ventas_del_dia(datos) is datos
+
+    # La bandeja sintética termina el 2017-04-30: pedir una fecha posterior no tiene datos del día.
+    futuro = leer_bandeja("2017-05-10", bandeja)
+    with pytest.raises(DatosNoDisponiblesError, match="ventas hasta 2017-04-30"):
+        exigir_ventas_del_dia(futuro)

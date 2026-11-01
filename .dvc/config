@@ -2,4 +2,4 @@
     autostage = true
     remote = local_storage
 ['remote "local_storage"']
-    url = /tmp/dvc-storage
+    url = /home/camena/product-dev/dvc-storage/motor-inventario

@@ -9,6 +9,7 @@ días que terminan en ds - horizonte, que son los que ya tienen todo su horizont
 El resumen se guarda en data/predictions/seguimiento_<ds>.csv (sobrescribe por fecha).
 
 Programación: diaria a las 07:00, después del DAG 01, con la misma semántica de ds.
+Si la bandeja todavía no tiene ventas de ds, el run se omite (skipped).
 """
 
 from __future__ import annotations
@@ -50,11 +51,17 @@ def seguimiento_desempeno():
 
     @task
     def evaluar_pedidos_publicados(fecha: str) -> str | None:
+        from airflow.sdk.exceptions import AirflowSkipException
+
+        from inventario.ingesta import DatosNoDisponiblesError
         from inventario.orquestacion import rutas
         from inventario.seguimiento import ejecutar_seguimiento
 
         r = rutas(fecha)
-        resultado = ejecutar_seguimiento(fecha, r.bandeja, r.predicciones, ruta_salida=r.seguimiento)
+        try:
+            resultado = ejecutar_seguimiento(fecha, r.bandeja, r.predicciones, ruta_salida=r.seguimiento)
+        except DatosNoDisponiblesError as error:
+            raise AirflowSkipException(str(error)) from error
         if resultado.empty:
             log.info("No hay pedidos con horizonte completo para evaluar a %s", fecha)
             return None
