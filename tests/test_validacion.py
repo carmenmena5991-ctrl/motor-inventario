@@ -90,3 +90,16 @@ def test_detecta_leakage(bandeja):
     con_futuro = replace(datos, ventas=pd.concat([datos.ventas, futuras], ignore_index=True))
     with pytest.raises(DatosInvalidosError, match="posteriores"):
         validar_datos(con_futuro)
+
+
+def test_transacciones():
+    from conftest import generar_transacciones
+    from inventario.validacion import validar_transacciones
+
+    transacciones = generar_transacciones()
+    validar_transacciones(transacciones)
+    transacciones.loc[0, "transactions"] = -1
+    with pytest.raises(DatosInvalidosError, match="negativos"):
+        validar_transacciones(transacciones)
+    with pytest.raises(DatosInvalidosError, match="duplicadas"):
+        validar_transacciones(pd.concat([generar_transacciones()] * 2))

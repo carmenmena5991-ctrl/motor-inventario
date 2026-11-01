@@ -68,14 +68,54 @@ def generar_tiendas() -> pd.DataFrame:
     )
 
 
+def generar_transacciones(dias: int = DIAS) -> pd.DataFrame:
+    fechas = pd.date_range(FECHA_INICIO, periods=dias, freq="D")
+    return pd.DataFrame(
+        [{"date": f, "store_nbr": t, "transactions": 1000 + 100 * t + f.day} for f in fechas for t in TIENDAS]
+    )
+
+
+# Misma estructura que config/bandeja.yaml, sobre el periodo de los datos sintéticos.
+FIN_HISTORICO = "2017-01-31"
+FIN_SIMULACION = "2017-04-30"
+
+
+def config_bandeja(incidencias: dict | None = None) -> dict:
+    return {
+        "periodo": {"fin_carga_historica": FIN_HISTORICO, "fin_simulacion": FIN_SIMULACION},
+        "semilla": 7,
+        "fuentes": {
+            "ventas": {"archivo": "train.csv", "frecuencia": "diaria", "retraso_dias": 0},
+            "transacciones": {"archivo": "transactions.csv", "frecuencia": "diaria", "retraso_dias": 1},
+            "petroleo": {"archivo": "oil.csv", "frecuencia": "dias_habiles", "retraso_dias": 1},
+            "feriados": {"archivo": "holidays_events.csv", "frecuencia": "mensual", "meses_anticipacion": 1},
+            "tiendas": {"archivo": "stores.csv", "frecuencia": "unica"},
+        },
+        "incidencias": incidencias or {},
+    }
+
+
 @pytest.fixture
-def bandeja(tmp_path: Path) -> Path:
-    ruta = tmp_path / "bandeja_origen"
+def origen_kaggle(tmp_path: Path) -> Path:
+    """Los CSV con los nombres de Kaggle (lo que se descarga de la competencia)."""
+    ruta = tmp_path / "raw_kaggle"
     ruta.mkdir()
     generar_ventas().to_csv(ruta / "train.csv", index=False)
+    generar_transacciones().to_csv(ruta / "transactions.csv", index=False)
     generar_petroleo().to_csv(ruta / "oil.csv", index=False)
     generar_feriados().to_csv(ruta / "holidays_events.csv", index=False)
     generar_tiendas().to_csv(ruta / "stores.csv", index=False)
+    return ruta
+
+
+@pytest.fixture
+def bandeja(tmp_path: Path, origen_kaggle: Path) -> Path:
+    """Bandeja por entregas sin incidencias: carga histórica al 31-ene y entregas diarias
+    hasta el 30-abr."""
+    from inventario.simulacion import generar_bandeja
+
+    ruta = tmp_path / "bandeja_origen"
+    generar_bandeja(origen_kaggle, ruta, config_bandeja())
     return ruta
 
 

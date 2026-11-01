@@ -46,12 +46,36 @@ def resolver_fecha(contexto: Mapping[str, Any]) -> str:
     raise ValueError("No se pudo determinar la fecha lógica de la ejecución")
 
 
+def resolver_conocimiento(contexto: Mapping[str, Any]) -> str | None:
+    """Fecha de conocimiento opcional (conf o params `conocimiento`), para reprocesar una
+    fecha pasada con las entregas conocidas hasta una fecha posterior (correcciones).
+    None = uso normal: solo lo entregado hasta la fecha lógica."""
+    dag_run = contexto.get("dag_run")
+    conf = getattr(dag_run, "conf", None) or {}
+    params = contexto.get("params") or {}
+    for candidato in (conf.get("conocimiento"), params.get("conocimiento")):
+        if candidato and str(candidato).strip().lower() not in {"none", "null"}:
+            return _a_iso(candidato)
+    return None
+
+
 @dataclass(frozen=True)
 class Rutas:
-    """Ubicación de los artefactos de cada etapa para una fecha lógica `ds`."""
+    """Ubicación de los artefactos de cada etapa para una fecha lógica `ds`.
+
+    En un reprocesamiento (`conocimiento` posterior a `ds`), las salidas usan la clave
+    `<ds>__conocimiento_<fecha>` para no sobrescribir el resultado publicado de `ds`.
+    """
 
     base: Path
     ds: str
+    conocimiento: str | None = None
+
+    @property
+    def clave(self) -> str:
+        if self.conocimiento is None:
+            return self.ds
+        return f"{self.ds}__conocimiento_{self.conocimiento}"
 
     @property
     def bandeja(self) -> Path:
@@ -59,15 +83,15 @@ class Rutas:
 
     @property
     def raw(self) -> Path:
-        return self.base / "data" / "raw" / self.ds
+        return self.base / "data" / "raw" / self.clave
 
     @property
     def validado(self) -> Path:
-        return self.base / "data" / "processed" / self.ds / "validado"
+        return self.base / "data" / "processed" / self.clave / "validado"
 
     @property
     def features(self) -> Path:
-        return self.base / "data" / "processed" / self.ds / "features.parquet"
+        return self.base / "data" / "processed" / self.clave / "features.parquet"
 
     @property
     def predicciones(self) -> Path:
@@ -75,13 +99,19 @@ class Rutas:
 
     @property
     def pedido(self) -> Path:
-        return self.predicciones / f"pedido_{self.ds}.csv"
+        return self.predicciones / f"pedido_{self.clave}.csv"
 
     @property
     def seguimiento(self) -> Path:
         return self.predicciones / f"seguimiento_{self.ds}.csv"
 
 
-def rutas(ds: str, base: str | Path | None = None) -> Rutas:
+def rutas(ds: str, base: str | Path | None = None, conocimiento: str | None = None) -> Rutas:
     """Rutas para `ds`. La base se toma de INVENTARIO_DIR o, por defecto, de la raíz del repo."""
-    return Rutas(Path(base or os.environ.get("INVENTARIO_DIR", BASE_DEFAULT)), _a_iso(ds))
+    ds = _a_iso(ds)
+    conocimiento = _a_iso(conocimiento) if conocimiento else None
+    if conocimiento is not None and conocimiento < ds:
+        raise ValueError("conocimiento no puede ser anterior a ds")
+    if conocimiento == ds:
+        conocimiento = None
+    return Rutas(Path(base or os.environ.get("INVENTARIO_DIR", BASE_DEFAULT)), ds, conocimiento)

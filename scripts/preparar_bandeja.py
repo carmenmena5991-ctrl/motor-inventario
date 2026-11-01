@@ -1,82 +1,53 @@
-"""Prepara bandeja_origen/ a partir del dataset descargado de Kaggle.
+"""Genera bandeja_origen/ (sistema de origen simulado) a partir de los CSV de Kaggle.
 
-Copia las fuentes que usa el motor con los nombres que espera inventario.ingesta:
-
-    train.csv            ventas            (recortadas con --hasta)
-    oil.csv              petróleo          (recortado con --hasta)
-    holidays_events.csv  feriados          (completo: el calendario se publica por adelantado)
-    stores.csv           tiendas           (completo: no depende del tiempo)
-
-Con --hasta se simula que la bandeja solo ha recibido datos hasta esa fecha, útil para
-probar los DAGs como si se ejecutaran en el pasado. Es idempotente: cada ejecución
-reemplaza los archivos de la bandeja.
+Crea la carga histórica inicial y un archivo por fuente y fecha de entrega, con las
+frecuencias, retrasos e incidencias de config/bandeja.yaml (ver inventario.simulacion).
+Es idempotente: con la misma configuración produce exactamente los mismos archivos.
 
 Uso:
     python scripts/preparar_bandeja.py
-    python scripts/preparar_bandeja.py --hasta 2017-06-30
-    python scripts/preparar_bandeja.py --origen data/raw_kaggle --destino bandeja_origen
+    python scripts/preparar_bandeja.py --config config/bandeja.yaml \
+        --origen data/raw_kaggle --destino bandeja_origen
 """
 
 from __future__ import annotations
 
 import argparse
-import os
-import shutil
-from datetime import date
+import sys
 from pathlib import Path
 
-import pandas as pd
-
 RAIZ = Path(__file__).resolve().parents[1]
-CON_FECHA = ("train.csv", "oil.csv")
-SIN_RECORTE = ("holidays_events.csv", "stores.csv")
+sys.path.insert(0, str(RAIZ / "src"))
 
-
-def _escribir_atomico(df: pd.DataFrame, ruta: Path) -> None:
-    temporal = ruta.with_name(ruta.name + ".tmp")
-    df.to_csv(temporal, index=False)
-    os.replace(temporal, ruta)
-
-
-def preparar_bandeja(origen: Path, destino: Path, hasta: date | None = None) -> dict[str, int]:
-    """Copia las fuentes de `origen` a `destino`. Devuelve las filas escritas por archivo."""
-    faltantes = [n for n in (*CON_FECHA, *SIN_RECORTE) if not (origen / n).exists()]
-    if faltantes:
-        raise FileNotFoundError(f"Faltan archivos en {origen}: {faltantes}")
-
-    destino.mkdir(parents=True, exist_ok=True)
-    filas: dict[str, int] = {}
-
-    for nombre in CON_FECHA:
-        if hasta is None:
-            shutil.copyfile(origen / nombre, destino / nombre)
-            with open(destino / nombre, encoding="utf-8") as f:
-                filas[nombre] = sum(1 for _ in f) - 1
-        else:
-            df = pd.read_csv(origen / nombre, parse_dates=["date"])
-            df = df.loc[df["date"] <= pd.Timestamp(hasta)]
-            df["date"] = df["date"].dt.strftime("%Y-%m-%d")
-            _escribir_atomico(df, destino / nombre)
-            filas[nombre] = len(df)
-
-    for nombre in SIN_RECORTE:
-        shutil.copyfile(origen / nombre, destino / nombre)
-        with open(destino / nombre, encoding="utf-8") as f:
-            filas[nombre] = sum(1 for _ in f) - 1
-
-    return filas
+from inventario.simulacion import cargar_config_bandeja, generar_bandeja  # noqa: E402
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--config", type=Path, default=RAIZ / "config" / "bandeja.yaml")
     parser.add_argument("--origen", type=Path, default=RAIZ / "data" / "raw_kaggle")
     parser.add_argument("--destino", type=Path, default=RAIZ / "bandeja_origen")
-    parser.add_argument("--hasta", type=date.fromisoformat, default=None, help="Última fecha disponible (YYYY-MM-DD)")
+    parser.add_argument(
+        "--incidencias", type=Path, default=RAIZ / "data" / "processed" / "bandeja_incidencias.csv",
+        help="Dónde guardar el detalle de las incidencias simuladas",
+    )
     args = parser.parse_args()
 
-    filas = preparar_bandeja(args.origen, args.destino, args.hasta)
-    for nombre, n in filas.items():
-        print(f"{args.destino / nombre}: {n} filas")
+    config = cargar_config_bandeja(args.config)
+    entregas, incidencias = generar_bandeja(args.origen, args.destino, config)
+
+    print(f"Bandeja generada en {args.destino}")
+    resumen = entregas.groupby("fuente").agg(
+        archivos=("fecha_entrega", "count"), filas=("filas", "sum"),
+        primera=("fecha_entrega", "min"), ultima=("fecha_entrega", "max"),
+    )
+    print(resumen.to_string())
+    print("\nIncidencias simuladas:")
+    print(incidencias.groupby(["tipo", "fuente"]).size().to_string() if len(incidencias) else "ninguna")
+
+    args.incidencias.parent.mkdir(parents=True, exist_ok=True)
+    incidencias.to_csv(args.incidencias, index=False)
+    print(f"\nDetalle de incidencias: {args.incidencias}")
 
 
 if __name__ == "__main__":

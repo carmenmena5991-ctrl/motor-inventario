@@ -1,0 +1,51 @@
+# Simulación del sistema de origen (bandeja_origen/) a partir de los CSV de Kaggle.
+#
+# scripts/preparar_bandeja.py genera un archivo por fuente y fecha de entrega:
+#     bandeja_origen/<fuente>/<fuente>_<AAAA-MM-DD>.csv
+# La fecha del nombre es la FECHA DE ENTREGA: el archivo está disponible para el run cuya
+# fecha lógica (ds) es esa fecha. El motor solo usa entregas con fecha <= ds.
+# Ver DECISIONES.md, sección 8.
+
+periodo:
+  fin_carga_historica: 2017-06-30   # todo lo entregado hasta aquí llega en una carga inicial
+  fin_simulacion: 2017-08-15        # última fecha de entrega simulada
+
+semilla: 42                         # mismas incidencias en cada ejecución
+
+fuentes:
+  ventas:
+    archivo: train.csv
+    frecuencia: diaria
+    retraso_dias: 0                 # las ventas de D llegan en la entrega D
+  transacciones:
+    archivo: transactions.csv
+    frecuencia: diaria
+    retraso_dias: 1                 # sistema de cajas que consolida al día siguiente
+  petroleo:
+    archivo: oil.csv
+    frecuencia: dias_habiles        # sin entregas en fin de semana
+    retraso_dias: 1                 # precio de cierre publicado al día siguiente
+  feriados:
+    archivo: holidays_events.csv
+    frecuencia: mensual
+    meses_anticipacion: 1           # el día 1 de cada mes llega el calendario del mes siguiente
+  tiendas:
+    archivo: stores.csv
+    frecuencia: unica               # solo en la carga histórica
+
+# Incidencias que se presentan en la operación real (solo en el periodo simulado).
+incidencias:
+  entregas_tardias:                 # la entrega de un día llega más tarde de lo normal
+    fuentes: [ventas, transacciones, petroleo]
+    probabilidad: 0.05
+    dias_extra: [1, 3]
+  correcciones:                     # datos entregados con error y corregidos después
+    fuentes: [ventas]
+    probabilidad: 0.10              # proporción de días con filas erróneas
+    fraccion_filas: 0.02            # proporción de filas erróneas en esos días
+    factor_error: [0.5, 1.5]        # valor entregado = valor real x factor
+    dias_despues: [1, 5]            # cuándo llega la corrección
+  entregas_corruptas:               # archivo inválido (venta negativa) que se reenvía corregido
+    fuentes: [ventas]
+    probabilidad: 0.03
+    dias_reenvio: 1

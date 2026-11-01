@@ -1,20 +1,30 @@
-"""Ingesta de la bandeja de entrada (bandeja_origen/) con corte por fecha lógica.
+"""Ingesta de la bandeja de entrada (bandeja_origen/) según lo entregado a cada fecha.
 
-Para evitar data leakage, todas las fuentes se recortan a la información disponible
-hasta la fecha de emisión (`fecha_corte`, normalmente el `logical_date`/`ds` de Airflow).
+La bandeja simula el sistema de origen: un archivo por fuente y por fecha de entrega,
 
-Convención de la bandeja: cada fuente puede llegar como un único archivo o como varias
-particiones que comparten prefijo (p. ej. ``train.csv`` o ``train_2017-08-01.csv``):
+    bandeja_origen/<fuente>/<fuente>_<AAAA-MM-DD>.csv
 
-- ``train*.csv``           -> ventas (date, store_nbr, family, sales, onpromotion)
-- ``oil*.csv``             -> petróleo (date, dcoilwtico)
-- ``holidays_events*.csv`` -> feriados (date, type, locale, locale_name, description, transferred)
-- ``stores*.csv``          -> tiendas (store_nbr, city, state, type, cluster) [opcional, sin fecha]
+donde la fecha del nombre es la FECHA DE ENTREGA (no la fecha de los datos). Un archivo
+puede traer datos de días anteriores (entregas tardías) o volver a enviar filas ya
+entregadas (correcciones). Reglas de lectura:
+
+1. Solo se usan las entregas con fecha <= `fecha_conocimiento` (por defecto, la fecha de
+   corte). Así, un backfill al 1-ago no ve una corrección que llegó el 10-ago.
+2. Cada archivo se valida por separado; un archivo inválido se pone en cuarentena (se
+   excluye y se registra) en lugar de detener todos los runs futuros.
+3. Si la misma fila llega varias veces, prevalece la entrega más reciente (corrección).
+4. Ventas, transacciones y petróleo se recortan a fechas de datos <= fecha de corte. Los
+   feriados entregados pueden traer fechas futuras: el calendario se publica por adelantado.
+5. Solo las ventas son obligatorias; si una fuente secundaria no ha llegado, se devuelve
+   vacía y el pipeline continúa.
+
+La bandeja es un sistema externo: este módulo la lee, pero nunca la modifica.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 
@@ -22,19 +32,32 @@ import pandas as pd
 
 BANDEJA_DEFAULT = Path("bandeja_origen")
 
-PATRONES = {
-    "ventas": "train*.csv",
-    "petroleo": "oil*.csv",
-    "feriados": "holidays_events*.csv",
-    "tiendas": "stores*.csv",
+FUENTES = ("ventas", "transacciones", "petroleo", "feriados", "tiendas")
+
+COLUMNAS_REQUERIDAS = {
+    "ventas": ["date", "store_nbr", "family", "sales", "onpromotion"],
+    "transacciones": ["date", "store_nbr", "transactions"],
+    "petroleo": ["date", "dcoilwtico"],
+    "feriados": ["date", "type", "locale", "locale_name", "description", "transferred"],
+    "tiendas": ["store_nbr", "city", "state"],
 }
 
 CLAVES = {
     "ventas": ["date", "store_nbr", "family"],
+    "transacciones": ["date", "store_nbr"],
     "petroleo": ["date"],
     "feriados": ["date", "type", "locale", "locale_name", "description"],
     "tiendas": ["store_nbr"],
 }
+
+# Fuentes cuyos datos no pueden ser posteriores a la fecha de corte.
+CON_CORTE = ("ventas", "transacciones", "petroleo")
+
+PATRON_ARCHIVO = re.compile(r"^(?P<fuente>[a-z]+)_(?P<fecha>\d{4}-\d{2}-\d{2})\.csv$")
+
+
+class DatosNoDisponiblesError(RuntimeError):
+    """La bandeja todavía no tiene la información necesaria para la fecha solicitada."""
 
 
 @dataclass(frozen=True)
@@ -44,10 +67,11 @@ class DatosBandeja:
     feriados: pd.DataFrame
     tiendas: pd.DataFrame | None
     fecha_corte: pd.Timestamp
-
-
-class DatosNoDisponiblesError(RuntimeError):
-    """La bandeja todavía no tiene ventas de la fecha solicitada."""
+    transacciones: pd.DataFrame | None = None
+    fecha_conocimiento: pd.Timestamp | None = None
+    entregas: tuple[str, ...] = ()
+    cuarentena: tuple[tuple[str, str], ...] = ()
+    correcciones: dict[str, int] = field(default_factory=dict)
 
 
 def normalizar_fecha(fecha: str | date | datetime | pd.Timestamp) -> pd.Timestamp:
@@ -57,70 +81,121 @@ def normalizar_fecha(fecha: str | date | datetime | pd.Timestamp) -> pd.Timestam
     return pd.Timestamp(ts.date())
 
 
-def _leer_fuente(bandeja: Path, fuente: str, obligatoria: bool = True) -> pd.DataFrame | None:
-    archivos = sorted(bandeja.glob(PATRONES[fuente]))
-    if not archivos:
-        if obligatoria:
-            raise FileNotFoundError(f"No hay archivos '{PATRONES[fuente]}' en {bandeja}")
-        return None
+def listar_entregas(bandeja: Path, fuente: str, hasta: pd.Timestamp) -> list[tuple[pd.Timestamp, Path]]:
+    """Archivos de `fuente` entregados hasta `hasta`, en orden de entrega."""
+    directorio = Path(bandeja) / fuente
+    if not directorio.is_dir():
+        return []
+    entregas = []
+    for ruta in directorio.iterdir():
+        coincide = PATRON_ARCHIVO.match(ruta.name)
+        if not coincide or coincide["fuente"] != fuente:
+            continue
+        fecha = pd.Timestamp(coincide["fecha"])
+        if fecha <= hasta:
+            entregas.append((fecha, ruta))
+    return sorted(entregas, key=lambda e: (e[0], e[1].name))
 
-    df = pd.concat([pd.read_csv(a) for a in archivos], ignore_index=True)
-    if "date" in df.columns:
-        df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    # Si una partición se reenvía, prevalece la última (orden alfabético de archivo).
-    claves = [c for c in CLAVES[fuente] if c in df.columns]
-    if claves:
-        df = df.drop_duplicates(subset=claves, keep="last")
-    return df
+
+def _vacia(fuente: str) -> pd.DataFrame:
+    columnas = {c: pd.Series(dtype="object") for c in COLUMNAS_REQUERIDAS[fuente]}
+    if "date" in columnas:
+        columnas["date"] = pd.Series(dtype="datetime64[ns]")
+    return pd.DataFrame(columnas)
 
 
-def _recortar(df: pd.DataFrame, hasta: pd.Timestamp) -> pd.DataFrame:
-    # Las fechas no parseables (NaT) se conservan para que validacion las detecte.
-    mascara = df["date"].isna() | (df["date"] <= hasta)
-    return df.loc[mascara].sort_values("date", kind="stable").reset_index(drop=True)
+def _leer_fuente(
+    entregas: list[tuple[pd.Timestamp, Path]], fuente: str
+) -> tuple[pd.DataFrame, list[tuple[str, str]], int]:
+    """Concatena las entregas válidas. Devuelve (datos, cuarentena, filas corregidas)."""
+    from inventario import validacion  # import diferido: validacion importa este módulo
+
+    validar = getattr(validacion, f"validar_{fuente}")
+    partes, cuarentena = [], []
+    for _, ruta in entregas:
+        df = pd.read_csv(ruta)
+        if "date" in df.columns:
+            df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        try:
+            validar(df)
+        except validacion.DatosInvalidosError as error:
+            cuarentena.append((f"{fuente}/{ruta.name}", str(error)))
+            continue
+        partes.append(df)
+
+    if not partes:
+        return _vacia(fuente), cuarentena, 0
+
+    datos = pd.concat(partes, ignore_index=True)
+    total = len(datos)
+    datos = datos.drop_duplicates(subset=CLAVES[fuente], keep="last").reset_index(drop=True)
+    return datos, cuarentena, total - len(datos)
 
 
 def leer_bandeja(
     fecha_corte: str | date | datetime | pd.Timestamp,
     bandeja: str | Path = BANDEJA_DEFAULT,
-    dias_calendario_futuro: int = 0,
+    fecha_conocimiento: str | date | datetime | pd.Timestamp | None = None,
 ) -> DatosBandeja:
-    """Lee la bandeja y devuelve solo la información disponible a `fecha_corte` (inclusive).
+    """Lee lo entregado hasta `fecha_conocimiento` con datos hasta `fecha_corte`.
 
-    `dias_calendario_futuro` permite incluir feriados posteriores al corte: el calendario
-    oficial se publica por adelantado, así que no es leakage y es necesario para predecir
-    el horizonte. Ventas y petróleo nunca pasan de `fecha_corte`.
+    - Uso normal: `fecha_conocimiento` = `fecha_corte` (lo que se sabía al emitir).
+    - Reprocesamiento: `fecha_conocimiento` > `fecha_corte` incorpora correcciones
+      entregadas después, sin usar datos posteriores al corte.
 
-    La función no modifica la bandeja: llamarla varias veces con los mismos argumentos
-    devuelve el mismo resultado.
+    Lanza `DatosNoDisponiblesError` si todavía no se ha entregado ninguna venta hasta el
+    corte. No modifica la bandeja: llamarla varias veces devuelve el mismo resultado.
     """
     bandeja = Path(bandeja)
     if not bandeja.is_dir():
         raise FileNotFoundError(f"No existe la bandeja de entrada: {bandeja}")
-    if dias_calendario_futuro < 0:
-        raise ValueError("dias_calendario_futuro debe ser >= 0")
 
     corte = normalizar_fecha(fecha_corte)
+    conocimiento = normalizar_fecha(fecha_conocimiento) if fecha_conocimiento is not None else corte
+    if conocimiento < corte:
+        raise ValueError("fecha_conocimiento no puede ser anterior a fecha_corte")
 
-    ventas = _recortar(_leer_fuente(bandeja, "ventas"), corte)
-    petroleo = _recortar(_leer_fuente(bandeja, "petroleo"), corte)
-    feriados = _recortar(
-        _leer_fuente(bandeja, "feriados"), corte + pd.Timedelta(days=dias_calendario_futuro)
+    tablas: dict[str, pd.DataFrame] = {}
+    usadas: list[str] = []
+    cuarentena: list[tuple[str, str]] = []
+    correcciones: dict[str, int] = {}
+    for fuente in FUENTES:
+        entregas = listar_entregas(bandeja, fuente, conocimiento)
+        usadas += [f"{fuente}/{ruta.name}" for _, ruta in entregas]
+        df, aisladas, corregidas = _leer_fuente(entregas, fuente)
+        cuarentena += aisladas
+        correcciones[fuente] = corregidas
+        if fuente in CON_CORTE:
+            df = df.loc[df["date"] <= corte]
+        if "date" in df.columns:
+            df = df.sort_values("date", kind="stable")
+        tablas[fuente] = df.reset_index(drop=True)
+
+    if tablas["ventas"].empty:
+        raise DatosNoDisponiblesError(
+            f"La bandeja no tiene ventas entregadas hasta {conocimiento.date()} con fecha <= {corte.date()}"
+        )
+
+    return DatosBandeja(
+        ventas=tablas["ventas"],
+        petroleo=tablas["petroleo"],
+        feriados=tablas["feriados"],
+        tiendas=tablas["tiendas"] if not tablas["tiendas"].empty else None,
+        fecha_corte=corte,
+        transacciones=tablas["transacciones"],
+        fecha_conocimiento=conocimiento,
+        entregas=tuple(usadas),
+        cuarentena=tuple(cuarentena),
+        correcciones=correcciones,
     )
-    tiendas = _leer_fuente(bandeja, "tiendas", obligatoria=False)
-
-    if ventas["date"].notna().sum() == 0:
-        raise ValueError(f"La bandeja no tiene ventas anteriores o iguales a {corte.date()}")
-
-    return DatosBandeja(ventas, petroleo, feriados, tiendas, corte)
 
 
 def exigir_ventas_del_dia(datos: DatosBandeja) -> DatosBandeja:
     """Comprueba que la bandeja ya recibió las ventas de la fecha de corte.
 
-    Si la última venta es anterior al corte, procesar esa fecha usaría datos viejos como
-    si fueran del día; en ese caso se lanza `DatosNoDisponiblesError` (los DAGs lo
-    convierten en una tarea omitida).
+    Si la última venta es anterior al corte (entrega tardía o en cuarentena), procesar esa
+    fecha usaría datos viejos como si fueran del día; en ese caso se lanza
+    `DatosNoDisponiblesError` (los DAGs lo convierten en una tarea omitida).
     """
     ultima = datos.ventas["date"].max()
     if pd.isna(ultima) or ultima < datos.fecha_corte:
