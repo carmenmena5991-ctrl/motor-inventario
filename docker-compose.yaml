@@ -26,7 +26,7 @@ x-airflow-comun: &airflow-comun
   # Mismo UID que el usuario de Ubuntu para poder escribir en ./data y ./logs.
   user: "${AIRFLOW_UID:-1000}:0"
   networks: [inventarioNet]
-  environment:
+  environment: &airflow-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
@@ -42,6 +42,7 @@ x-airflow-comun: &airflow-comun
     - ./dags:/opt/airflow/dags
     - ./src:/opt/airflow/src
     - ./config:/opt/airflow/config
+    - ./params.yaml:/opt/airflow/params.yaml:ro
     - ./data:/opt/airflow/data
     - ./bandeja_origen:/opt/airflow/bandeja_origen:ro
     - ./logs:/opt/airflow/logs
@@ -76,6 +77,13 @@ services:
       --allowed-hosts mlflow,mlflow:5000,localhost,localhost:5000,127.0.0.1,127.0.0.1:5000
       --host 0.0.0.0
       --port 5000
+      --workers 2
+    # En reposo ocupaba ~2.2 GiB (WSL tiene ~6.6 GiB en total). Casi todo eran 7 procesos
+    # huey_consumer (~220 MiB c/u) del ejecutor de jobs de MLflow 3 (GenAI/evaluación), que
+    # este proyecto no usa; se desactiva. Más 4 workers web por defecto, que se bajan a 2.
+    environment:
+      MLFLOW_SERVER_ENABLE_JOB_EXECUTION: "false"
+    mem_limit: 1g
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
       interval: 10s
@@ -101,7 +109,13 @@ services:
 
   airflow-init:
     <<: *airflow-comun
-    command: db migrate
+    # `pools set` es idempotente: crea o actualiza el pool de entrenamiento (1 slot).
+    command:
+      - bash
+      - -c
+      - >-
+        airflow db migrate &&
+        airflow pools set entrenamiento 1 "Un entrenamiento a la vez (~1.6 GiB c/u)"
     restart: "no"
     depends_on:
       postgres:
@@ -111,6 +125,7 @@ services:
     <<: *airflow-comun
     command: api-server
     restart: unless-stopped
+    mem_limit: 1g
     ports:
       - "8080:8080"
     healthcheck:
@@ -124,6 +139,12 @@ services:
     <<: *airflow-comun
     command: scheduler
     restart: unless-stopped
+    # Con LocalExecutor las tareas corren aquí. Base ~0.5 GiB + un entrenamiento ~1.6 GiB.
+    # Si se excede, Docker mata este contenedor y no tumba WSL.
+    mem_limit: 3500m
+    environment:
+      <<: *airflow-env
+      AIRFLOW__CORE__PARALLELISM: "4"
     depends_on:
       <<: *airflow-depende
       airflow-apiserver:
@@ -133,3 +154,4 @@ services:
     <<: *airflow-comun
     command: dag-processor
     restart: unless-stopped
+    mem_limit: 1g

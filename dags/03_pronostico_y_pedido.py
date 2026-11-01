@@ -1,16 +1,21 @@
 """DAG 03 - Pronóstico y pedido sugerido.
 
-Descarga de MLflow el modelo con alias @Champions, pronostica los próximos días
-(`parametros_pedido.horizonte_dias` de config/costos.yaml, 7 por defecto) a partir de
-data/processed/<ds>/features.parquet y guarda la recomendación en
-data/predictions/pedido_<ds>.csv (se sobrescribe por fecha: idempotente).
+1. `asegurar_modelo`: toma la versión con alias @Champions; si todavía no existe (primer
+   arranque de un clon nuevo), entrena una con lo entregado hasta ds. Así el pronóstico no
+   depende de ningún paso manual.
+2. `pronosticar_y_generar_pedido`: carga ESA versión, pronostica los próximos días
+   (`parametros_pedido.horizonte_dias` de config/costos.yaml) a partir de
+   data/processed/<ds>/features.parquet y guarda data/predictions/pedido_<ds>.csv, con la
+   columna `modelo_version` (se sobrescribe por fecha: idempotente).
 
-Lo dispara el DAG 02 con conf={"ds": ...}. El servidor MLflow se toma de
+Lo dispara el DAG 02 con conf={"ds": ...}. Un solo run a la vez, para que dos backfills
+no entrenen en paralelo el modelo inicial. El servidor MLflow se toma de
 MLFLOW_TRACKING_URI (por defecto http://mlflow:5000).
 """
 
 from __future__ import annotations
 
+import logging
 import sys
 from datetime import timedelta
 from pathlib import Path
@@ -23,6 +28,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 ZONA = "America/Guayaquil"
+log = logging.getLogger(__name__)
 
 
 @dag(
@@ -31,6 +37,7 @@ ZONA = "America/Guayaquil"
     schedule=None,
     start_date=pendulum.datetime(2017, 1, 1, tz=ZONA),
     catchup=False,
+    max_active_runs=1,
     default_args={"owner": "inventario", "retries": 2, "retry_delay": timedelta(minutes=5)},
     params={
         "ds": Param(None, type=["null", "string"], description="Fecha lógica YYYY-MM-DD"),
@@ -47,8 +54,19 @@ def pronostico_y_pedido():
         r = rutas(resolver(contexto), conocimiento=resolver_conocimiento(contexto))
         return {"ds": r.ds, "conocimiento": r.conocimiento or "", "clave": r.clave}
 
+    # Puede entrenar: comparte el pool de 1 slot con DAG 05.entrenar_y_decidir (memoria).
+    @task(pool="entrenamiento")
+    def asegurar_modelo(fecha: str) -> str:
+        from inventario.entrenar import asegurar_modelo_vigente
+        from inventario.orquestacion import rutas
+
+        version, entrenado = asegurar_modelo_vigente(fecha, rutas(fecha).bandeja)
+        if entrenado:
+            log.info("No había modelo vigente: se entrenó la versión %s con datos hasta %s", version, fecha)
+        return version
+
     @task
-    def pronosticar_y_generar_pedido(fecha: str, conocimiento: str) -> str:
+    def pronosticar_y_generar_pedido(fecha: str, conocimiento: str, version: str) -> str:
         import pandas as pd
 
         from inventario.almacen import cargar_tabla
@@ -63,13 +81,14 @@ def pronostico_y_pedido():
         r = rutas(fecha, conocimiento=conocimiento or None)
         corte = pd.Timestamp(fecha)
         features = cargar_tabla(r.features)
-        modelo = cargar_modelo_champions()
+        modelo = cargar_modelo_champions(version=version)
         pronostico = pronosticar_desde_features(modelo, features, corte)
         # Un reproceso escribe pedido_<ds>__conocimiento_<fecha>.csv: el publicado no cambia.
-        return str(guardar_pedido(generar_pedido(pronostico, corte), corte, ruta=r.pedido))
+        pedido = generar_pedido(pronostico, corte, modelo_version=version)
+        return str(guardar_pedido(pedido, corte, ruta=r.pedido))
 
     fecha = resolver_fecha()
-    pronosticar_y_generar_pedido(fecha["ds"], fecha["conocimiento"])
+    pronosticar_y_generar_pedido(fecha["ds"], fecha["conocimiento"], asegurar_modelo(fecha["ds"]))
 
 
 pronostico_y_pedido()
