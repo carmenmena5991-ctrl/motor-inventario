@@ -102,6 +102,11 @@ class Rutas:
         return self.predicciones / f"pedido_{self.clave}.csv"
 
     @property
+    def pronostico(self) -> Path:
+        """Pronóstico diario por cuantil del horizonte (p10, p50, objetivo, p90)."""
+        return self.predicciones / f"pronostico_{self.clave}.csv"
+
+    @property
     def manifiesto(self) -> Path:
         """Qué produjo el pedido: código, modelo y datos con sus huellas (versionado.py)."""
         return self.predicciones / f"pedido_{self.clave}.json"

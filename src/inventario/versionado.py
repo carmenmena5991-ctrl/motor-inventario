@@ -124,7 +124,11 @@ def _relativa(ruta: Path, base: Path) -> str:
 def manifiesto_pedido(r: Rutas, nombre_modelo: str, version: str | int, ruta_modelo: str | Path) -> dict[str, Any]:
     """Qué produjo el pedido de `r`: entradas, modelo y código, con sus huellas."""
     base = r.base
+    extra = {}
+    if r.pronostico.exists():  # pronóstico diario por cuantil (desde la sección 11)
+        extra["pronostico"] = {"ruta": _relativa(r.pronostico, base), "md5": md5_archivo(r.pronostico)}
     return {
+        **extra,
         "clave": r.clave,
         "ds": r.ds,
         "conocimiento": r.conocimiento,
