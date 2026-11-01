@@ -5,7 +5,7 @@ costos:
 
 parametros_pedido:
   horizonte_dias: 7    # Días a pronosticar hacia adelante
-  cuantil_objetivo: 0.90 # Cuantil base para cubrir incertidumbre (p90)
+  cuantil_objetivo: 0.71 # Ratio crítico 5 / (5 + 2); ver DECISIONES.md, sección 7
   factor_seguridad_default: 0.15
 
 # Métricas de seguimiento
