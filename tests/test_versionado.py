@@ -86,6 +86,48 @@ def test_info_codigo_detecta_cambios_sin_confirmar(tmp_path):
     assert info_codigo(tmp_path)["modificado"] is True
 
 
+def test_resolver_repo(monkeypatch, tmp_path):
+    from inventario.versionado import resolver_repo
+
+    monkeypatch.setenv("INVENTARIO_DIR", str(tmp_path / "base"))
+    monkeypatch.delenv("INVENTARIO_REPO", raising=False)
+    assert resolver_repo() == tmp_path / "base"  # en el host, la raíz es la base
+    monkeypatch.setenv("INVENTARIO_REPO", str(tmp_path / "repo"))
+    assert resolver_repo() == tmp_path / "repo"  # en Docker, /opt/airflow/repo
+    assert resolver_repo(tmp_path / "otro") == tmp_path / "otro"
+
+
+def test_commit_del_manifiesto_se_lee_en_la_raiz_del_repo(monkeypatch, tmp_path):
+    """En Docker los datos están en /opt/airflow y el .git en /opt/airflow/repo."""
+    import pandas as pd
+
+    from inventario.orquestacion import rutas
+    from inventario.versionado import manifiesto_pedido
+
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "m.py").write_text("x = 1\n")
+    _git(repo, "init", "-q")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "inicial")
+
+    r = rutas("2017-04-20", base=tmp_path / "datos")  # base sin .git
+    for ruta in (r.pedido, r.features):
+        ruta.parent.mkdir(parents=True, exist_ok=True)
+        ruta.write_text("x\n")
+    r.raw.mkdir(parents=True)
+    (r.raw / "meta.json").write_text("{}")
+    modelo = tmp_path / "datos" / "models" / "m" / "v1"
+    modelo.mkdir(parents=True)
+    (modelo / "MLmodel").write_text("m")
+
+    monkeypatch.delenv("INVENTARIO_REPO", raising=False)
+    assert manifiesto_pedido(r, "m", 1, modelo)["codigo"]["commit"] is None
+    monkeypatch.setenv("INVENTARIO_REPO", str(repo))
+    codigo = manifiesto_pedido(r, "m", 1, modelo)["codigo"]
+    assert len(codigo["commit"]) == 40 and codigo["modificado"] is False
+
+
 # --- exportación del modelo ----------------------------------------------------------
 
 

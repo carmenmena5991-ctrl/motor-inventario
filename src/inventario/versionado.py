@@ -42,6 +42,15 @@ def resolver_base(base: str | Path | None) -> Path:
     return Path(base or os.environ.get("INVENTARIO_DIR", BASE_DEFAULT))
 
 
+def resolver_repo(repo: str | Path | None = None) -> Path:
+    """Raíz del repositorio (punteros .dvc, .dvc/, .git): `repo`, INVENTARIO_REPO o la base.
+
+    En Docker es /opt/airflow/repo, el repo montado como carpeta; en el host coincide con la
+    base. Los datos son los mismos archivos vistos desde dos rutas.
+    """
+    return Path(repo or os.environ.get("INVENTARIO_REPO") or resolver_base(None))
+
+
 def md5_archivo(ruta: str | Path) -> str:
     h = hashlib.md5()
     with open(ruta, "rb") as f:
@@ -102,7 +111,7 @@ def exportar_modelo(
 def info_codigo(base: str | Path | None = None) -> dict[str, Any]:
     """Commit de git del código y si los archivos que determinan el resultado tenían
     cambios sin confirmar. Sin git disponible, ambos son None."""
-    base = resolver_base(base)
+    base = resolver_repo(base)
     try:
         commit = subprocess.run(
             ["git", "-C", str(base), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
@@ -124,7 +133,11 @@ def _relativa(ruta: Path, base: Path) -> str:
 def manifiesto_pedido(r: Rutas, nombre_modelo: str, version: str | int, ruta_modelo: str | Path) -> dict[str, Any]:
     """Qué produjo el pedido de `r`: entradas, modelo y código, con sus huellas."""
     base = r.base
+    extra = {}
+    if r.pronostico.exists():  # pronóstico diario por cuantil (desde la sección 11)
+        extra["pronostico"] = {"ruta": _relativa(r.pronostico, base), "md5": md5_archivo(r.pronostico)}
     return {
+        **extra,
         "clave": r.clave,
         "ds": r.ds,
         "conocimiento": r.conocimiento,
@@ -137,7 +150,8 @@ def manifiesto_pedido(r: Rutas, nombre_modelo: str, version: str | int, ruta_mod
             "ruta": _relativa(Path(ruta_modelo), base),
             "md5": md5_directorio(ruta_modelo),
         },
-        "codigo": info_codigo(base),
+        # El commit se lee en la raíz del repo (en Docker, /opt/airflow/repo).
+        "codigo": info_codigo(os.environ.get("INVENTARIO_REPO") or base),
     }
 
 
@@ -173,7 +187,7 @@ def remoto_accesible(base: str | Path | None = None, ejecutar: Ejecutor = subpro
     contenedor, `dvc push` lo crearía dentro del contenedor y los datos se perderían.
     Los remotos en la nube se dan por accesibles (las credenciales las valida `dvc push`).
     """
-    base = resolver_base(base)
+    base = resolver_repo(base)
     try:
         nombre = _dvc(["remote", "default"], base, ejecutar)
         url = _dvc(["config", f"remote.{nombre}.url"], base, ejecutar) if nombre else ""
@@ -210,7 +224,7 @@ def versionar_con_dvc(
     no accesible (p. ej. un clon nuevo sin remoto montado) no es un error: los datos quedan
     en la caché local y se suben después con `dvc push`.
     """
-    base = resolver_base(base)
+    base = resolver_repo(base)
     existentes = tuple(r for r in rutas if (base / r).exists())
     if not existentes:
         return ResultadoVersionado((), False, "no hay nada que versionar")

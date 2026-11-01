@@ -14,6 +14,7 @@ from inventario.entrenar import (
     ALIAS_CAMPEON,
     MODELO_REGISTRADO_DEFAULT,
     columnas_modelo,
+    nombre_cuantil,
     resolver_tracking_uri,
 )
 from inventario.features import CLAVES, LAGS, VENTANAS, construir_features
@@ -88,16 +89,56 @@ def preparar_features_prediccion(
     )
 
 
-def pronosticar_desde_features(modelo: Any, features: pd.DataFrame, fecha_corte: pd.Timestamp) -> pd.DataFrame:
-    """Aplica el modelo a las filas posteriores al corte."""
+def _modelo_crudo(modelo: Any) -> Any:
+    """El estimador detrás de un modelo de MLflow (pyfunc), o el propio objeto."""
+    return modelo.get_raw_model() if hasattr(modelo, "get_raw_model") else modelo
+
+
+def pronosticar_con_cuantiles(
+    modelo: Any, features: pd.DataFrame, fecha_corte: pd.Timestamp, cuantil_objetivo: float | None = None
+) -> pd.DataFrame:
+    """Pronóstico diario de las filas posteriores al corte, con una columna por cuantil.
+
+    Devuelve date, store_nbr, family, una columna pXX por cuantil (p. ej. p10, p50, p71, p90)
+    y `pronostico`, el cuantil objetivo (el que usa el pedido). Un modelo con un solo
+    cuantil (versiones anteriores o el baseline) entrega solo el objetivo.
+    """
     a_predecir = features.loc[features["date"] > fecha_corte]
     if a_predecir.empty:
         raise ValueError(f"No hay filas posteriores a {fecha_corte.date()} para pronosticar")
-    prediccion = np.clip(np.asarray(modelo.predict(a_predecir[columnas_modelo()]), dtype=float), 0, None)
-
+    X = a_predecir[columnas_modelo()]
     resultado = a_predecir[["date", *CLAVES]].copy()
-    resultado["pronostico"] = prediccion
+
+    crudo = _modelo_crudo(modelo)
+    if hasattr(crudo, "predict_cuantiles"):
+        cuantiles = crudo.predict_cuantiles(X)
+        objetivo = nombre_cuantil(crudo.cuantil_objetivo)
+        resultado[list(cuantiles.columns)] = cuantiles.to_numpy()
+        resultado["pronostico"] = resultado[objetivo]
+    else:
+        q = cuantil_objetivo if cuantil_objetivo is not None else cargar_costos()["parametros_pedido"]["cuantil_objetivo"]
+        resultado[nombre_cuantil(q)] = np.clip(np.asarray(modelo.predict(X), dtype=float), 0, None)
+        resultado["pronostico"] = resultado[nombre_cuantil(q)]
     return resultado.reset_index(drop=True)
+
+
+def pronosticar_desde_features(modelo: Any, features: pd.DataFrame, fecha_corte: pd.Timestamp) -> pd.DataFrame:
+    """Aplica el modelo a las filas posteriores al corte (solo el cuantil objetivo)."""
+    resultado = pronosticar_con_cuantiles(modelo, features, fecha_corte)
+    return resultado[["date", *CLAVES, "pronostico"]]
+
+
+def guardar_pronostico(pronostico: pd.DataFrame, ruta: str | Path, modelo_version: str | None = None) -> Path:
+    """Escribe el pronóstico diario por cuantil (data/predictions/pronostico_<clave>.csv).
+    Sobrescribe el de esa fecha: re-ejecutar no duplica resultados."""
+    salida = pronostico.drop(columns=["pronostico"], errors="ignore").copy()
+    salida["date"] = pd.to_datetime(salida["date"]).dt.strftime("%Y-%m-%d")
+    if modelo_version is not None:
+        salida["modelo_version"] = str(modelo_version)
+    ruta = Path(ruta)
+    ruta.parent.mkdir(parents=True, exist_ok=True)
+    salida.to_csv(ruta, index=False)
+    return ruta
 
 
 def pronosticar(

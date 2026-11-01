@@ -68,6 +68,27 @@ def test_ejecutar_seguimiento(bandeja, ruta_costos, tmp_path):
     primera = archivo.read_text()
     ejecutar_seguimiento("2017-04-20", bandeja, predicciones, ruta_costos)
     assert archivo.read_text() == primera  # idempotente
+    assert "cobertura_p10_p90" not in resultado.columns  # pedido sin pronóstico diario
+
+
+def test_seguimiento_mide_la_calibracion_del_pronostico_diario(bandeja, ruta_costos, tmp_path):
+    predicciones = tmp_path / "predicciones"
+    predicciones.mkdir()
+    pd.DataFrame(
+        {"fecha_emision": ["2017-04-13"] * 2, "store_nbr": [1, 2], "family": ["GROCERY I"] * 2,
+         "pronostico_horizonte": [150.0, 300.0], "dias_horizonte": [7, 7], "pedido_sugerido": [150, 300]}
+    ).to_csv(predicciones / "pedido_2017-04-13.csv", index=False)
+    dias = pd.date_range("2017-04-14", periods=7).strftime("%Y-%m-%d")
+    pd.DataFrame(  # intervalo [0, 1e6]: contiene toda venta; p50 = 0: ninguna venta queda debajo
+        [{"date": d, "store_nbr": t, "family": "GROCERY I", "p10": 0.0, "p50": 0.0, "p90": 1e6, "modelo_version": "1"}
+         for d in dias for t in (1, 2)]
+    ).to_csv(predicciones / "pronostico_2017-04-13.csv", index=False)
+
+    resultado = ejecutar_seguimiento("2017-04-20", bandeja, predicciones, ruta_costos)
+    assert resultado.loc[0, "cobertura_p10_p90"] == 1.0
+    assert resultado.loc[0, "cobertura_p90"] == 1.0
+    assert resultado.loc[0, "cobertura_p50"] == 0.0  # las ventas sintéticas son positivas
+    assert resultado.loc[0, "ancho_medio_p10_p90"] == 1e6
 
 
 def test_sin_pedidos_evaluables(bandeja, ruta_costos, tmp_path):

@@ -129,6 +129,7 @@ def test_candidato_mejor_reemplaza_al_vigente(bandeja, ruta_costos, mlflow_local
     cliente = MlflowClient(tracking_uri=mlflow_local)
     cliente.set_model_version_tag("modelo_prueba", malo.version, "decision", "promovido")
     cliente.set_model_version_tag("modelo_prueba", malo.version, "fecha_corte", "2017-04-01")
+    cliente.set_model_version_tag("modelo_prueba", malo.version, "cuantiles", "p90")
     cliente.set_registered_model_alias("modelo_prueba", ALIAS_CAMPEON, malo.version)
 
     bueno = _entrenar(bandeja, ruta_costos, mlflow_local)
@@ -137,6 +138,32 @@ def test_candidato_mejor_reemplaza_al_vigente(bandeja, ruta_costos, mlflow_local
     assert bueno.metricas[bueno.ganador]["costo_total_inventario"] < 0.98 * bueno.costo_vigente
     assert bueno.promovido
     assert version_vigente("modelo_prueba", tracking_uri=mlflow_local) == bueno.version
+
+
+def test_version_sin_cuantiles_no_es_vigente(bandeja, ruta_costos, mlflow_local):
+    """Las versiones anteriores al pronóstico con intervalos no se usan para nuevos pedidos."""
+    import mlflow
+
+    from inventario.entrenar import TIPOS_CONFIABLES_SKOPS, version_vigente_a_fecha
+
+    mlflow.set_experiment("pruebas")
+    with mlflow.start_run():
+        info = mlflow.sklearn.log_model(
+            BaselinePromedioMovil().fit(pd.DataFrame({"media_movil_28": [0.0]})),
+            name="modelo", skops_trusted_types=TIPOS_CONFIABLES_SKOPS,
+        )
+    antigua = mlflow.register_model(info.model_uri, "modelo_prueba")
+    cliente = MlflowClient(tracking_uri=mlflow_local)
+    cliente.set_model_version_tag("modelo_prueba", antigua.version, "decision", "promovido")
+    cliente.set_model_version_tag("modelo_prueba", antigua.version, "fecha_corte", "2017-04-01")
+    assert version_vigente_a_fecha("2017-04-20", "modelo_prueba", mlflow_local) is None
+
+    nueva = _entrenar(bandeja, ruta_costos, mlflow_local)
+    assert nueva.promovido and nueva.motivo == "no hay modelo vigente"
+    etiquetas = cliente.get_model_version("modelo_prueba", nueva.version).tags
+    # Objetivo 0.9 (config de prueba) + intervalo [0.1, 0.5, 0.9] de params.yaml, sin repetir.
+    assert etiquetas["cuantiles"] == "p10,p50,p90"
+    assert version_vigente_a_fecha("2017-04-20", "modelo_prueba", mlflow_local) == nueva.version
 
 
 def test_asegurar_modelo_vigente(bandeja, ruta_costos, mlflow_local):

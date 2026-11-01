@@ -30,6 +30,9 @@ def cargar_params(ruta: str | Path | None = None) -> dict[str, Any]:
         raise ValueError("entrenamiento.dia_reentrenamiento debe estar entre 0 (lunes) y 6 (domingo)")
     if not 0 <= float(params["promocion"]["mejora_minima"]) < 1:
         raise ValueError("promocion.mejora_minima debe estar en [0, 1)")
+    cuantiles = params["entrenamiento"].get("cuantiles_intervalo") or []
+    if not isinstance(cuantiles, list) or not all(0 < float(q) < 1 for q in cuantiles):
+        raise ValueError("entrenamiento.cuantiles_intervalo debe ser una lista de valores en (0, 1)")
     return params
 
 

@@ -6,9 +6,10 @@
 2. `exportar_modelo`: copia esa versión a models/<nombre>/v<versión>/ (rastreado por DVC).
 3. `pronosticar_y_generar_pedido`: carga ESA copia, pronostica los próximos días
    (`parametros_pedido.horizonte_dias` de config/costos.yaml) a partir de
-   data/processed/<ds>/features.parquet y guarda data/predictions/pedido_<ds>.csv, con la
-   columna `modelo_version` (se sobrescribe por fecha: idempotente), y su manifiesto
-   pedido_<ds>.json (commit del código, modelo y huellas de las entradas).
+   data/processed/<ds>/features.parquet, guarda el pronóstico diario por cuantil
+   (data/predictions/pronostico_<ds>.csv: p10, p50, objetivo y p90) y el pedido
+   (pedido_<ds>.csv), ambos con `modelo_version` (se sobrescriben por fecha: idempotente),
+   y su manifiesto pedido_<ds>.json (commit del código, modelo y huellas).
 4. `versionar`: `dvc add` de datos, pedidos y modelos, y `dvc push` si el remoto está
    montado (DECISIONES.md, sección 10).
 
@@ -87,7 +88,8 @@ def pronostico_y_pedido():
             cargar_modelo_local,
             generar_pedido,
             guardar_pedido,
-            pronosticar_desde_features,
+            guardar_pronostico,
+            pronosticar_con_cuantiles,
         )
         from inventario.versionado import guardar_manifiesto, manifiesto_pedido
 
@@ -96,8 +98,9 @@ def pronostico_y_pedido():
         features = cargar_tabla(r.features)
         # Se usa la copia exportada (la que versiona DVC), no la del servidor MLflow.
         modelo = cargar_modelo_local(ruta_modelo)
-        pronostico = pronosticar_desde_features(modelo, features, corte)
+        pronostico = pronosticar_con_cuantiles(modelo, features, corte)
         # Un reproceso escribe pedido_<ds>__conocimiento_<fecha>.csv: el publicado no cambia.
+        guardar_pronostico(pronostico, r.pronostico, modelo_version=version)
         pedido = generar_pedido(pronostico, corte, modelo_version=version)
         guardar_pedido(pedido, corte, ruta=r.pedido)
         guardar_manifiesto(manifiesto_pedido(r, MODELO_REGISTRADO_DEFAULT, version, ruta_modelo), r.manifiesto)

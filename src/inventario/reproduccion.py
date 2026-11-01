@@ -20,7 +20,13 @@ from pathlib import Path
 import pandas as pd
 
 from inventario.almacen import cargar_tabla
-from inventario.predecir import cargar_modelo_local, generar_pedido, guardar_pedido, pronosticar_desde_features
+from inventario.predecir import (
+    cargar_modelo_local,
+    generar_pedido,
+    guardar_pedido,
+    guardar_pronostico,
+    pronosticar_con_cuantiles,
+)
 from inventario.versionado import cargar_manifiesto, md5_archivo, md5_directorio, resolver_base
 
 
@@ -33,6 +39,10 @@ class ResultadoReproduccion:
     md5_publicado: str = ""
     md5_reproducido: str = ""
     filas: int = 0
+    # Pronóstico diario por cuantil: solo en manifiestos que lo incluyen (sección 11).
+    tiene_pronostico: bool = False
+    md5_pronostico_publicado: str = ""
+    md5_pronostico_reproducido: str = ""
 
     @property
     def entradas_coinciden(self) -> bool:
@@ -40,7 +50,11 @@ class ResultadoReproduccion:
 
     @property
     def identico(self) -> bool:
-        return self.entradas_coinciden and self.md5_publicado == self.md5_reproducido != ""
+        pedido = self.md5_publicado == self.md5_reproducido != ""
+        pronostico = not self.tiene_pronostico or (
+            self.md5_pronostico_publicado == self.md5_pronostico_reproducido != ""
+        )
+        return self.entradas_coinciden and pedido and pronostico
 
 
 def reproducir_pedido(clave: str, base: str | Path | None = None) -> ResultadoReproduccion:
@@ -65,14 +79,22 @@ def reproducir_pedido(clave: str, base: str | Path | None = None) -> ResultadoRe
     }
     ruta_publicado = base / m["pedido"]["ruta"]
     resultado.md5_publicado = md5_archivo(ruta_publicado) if ruta_publicado.exists() else ""
+    if "pronostico" in m:
+        resultado.tiene_pronostico = True
+        ruta_pronostico = base / m["pronostico"]["ruta"]
+        resultado.md5_pronostico_publicado = md5_archivo(ruta_pronostico) if ruta_pronostico.exists() else ""
     if not (resultado.verificaciones["features"] and resultado.verificaciones["modelo"]):
         return resultado  # sin las entradas exactas no tiene sentido regenerar
 
     corte = pd.Timestamp(m["ds"])
-    pronostico = pronosticar_desde_features(cargar_modelo_local(ruta_modelo), cargar_tabla(ruta_features), corte)
-    pedido = generar_pedido(pronostico, corte, modelo_version=m["modelo"]["version"])
+    version = m["modelo"]["version"]
+    pronostico = pronosticar_con_cuantiles(cargar_modelo_local(ruta_modelo), cargar_tabla(ruta_features), corte)
+    pedido = generar_pedido(pronostico, corte, modelo_version=version)
     with tempfile.TemporaryDirectory() as tmp:
         regenerado = guardar_pedido(pedido, corte, ruta=Path(tmp) / "pedido.csv")
         resultado.md5_reproducido = md5_archivo(regenerado)
+        if resultado.tiene_pronostico:
+            diario = guardar_pronostico(pronostico, Path(tmp) / "pronostico.csv", modelo_version=version)
+            resultado.md5_pronostico_reproducido = md5_archivo(diario)
     resultado.filas = len(pedido)
     return resultado

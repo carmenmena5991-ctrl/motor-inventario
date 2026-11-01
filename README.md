@@ -4,8 +4,8 @@ Producto de ML que, de forma automática y reproducible, convierte las ventas qu
 
 En cada fecha de corte (`ds`) el producto entrega:
 
-1. **Pronóstico** de los próximos 7 días por tienda y familia con un modelo de regresión cuantílica (cuantil 0.71, el ratio crítico de los costos).
-2. **Pedido sugerido** (`data/predictions/pedido_<ds>.csv`) a partir de ese pronóstico y de los costos de `config/costos.yaml` (quiebre de stock 5, merma 2). Si cambian los costos, cambia la recomendación sin tocar el código.
+1. **Pronóstico diario con incertidumbre** (`data/predictions/pronostico_<ds>.csv`): para cada uno de los próximos 7 días, por tienda y familia, los cuantiles **p10, p50, p71 y p90**. p10–p90 es el intervalo del 80 %, p50 la mediana y p71 el cuantil objetivo (el ratio crítico de los costos).
+2. **Pedido sugerido** (`data/predictions/pedido_<ds>.csv`): la suma del p71 del horizonte, según los costos de `config/costos.yaml` (quiebre de stock 5, merma 2). Si cambian los costos, cambia la recomendación sin tocar el código.
 3. **Seguimiento del desempeño** (`data/predictions/seguimiento_<ds>.csv`): error y costo real de los pedidos ya publicados, a medida que se conocen las ventas.
 
 Cada pedido se puede rastrear hasta el código, los datos y el modelo que lo produjeron (Git + DVC + MLflow), y reproducirse byte a byte.
@@ -25,7 +25,8 @@ bandeja_origen/<fuente>/<fuente>_<fecha de entrega>.csv     ← sistema de orige
       ├─ DAG 05  05:00  entrenamiento semanal y criterio de reemplazo   → MLflow (@Champions) + models/
       ├─ DAG 01  06:00  ingesta por fecha de entrega y validación        → data/raw/<ds>/, data/processed/<ds>/validado/
       │     └─ DAG 02     features (lags, medias móviles, feriados, petróleo) → data/processed/<ds>/features.parquet
-      │          └─ DAG 03  pronóstico, pedido, manifiesto y versionado  → data/predictions/pedido_<ds>.{csv,json} + DVC
+      │          └─ DAG 03  pronóstico por cuantil, pedido, manifiesto y versionado
+      │                     → data/predictions/pronostico_<ds>.csv, pedido_<ds>.{csv,json} + DVC
       └─ DAG 04  07:00  seguimiento: pedidos publicados vs. ventas reales → data/predictions/seguimiento_<ds>.csv + DVC
 ```
 
@@ -78,7 +79,7 @@ Lanza los backfills en orden y espera a que termine cada etapa, siempre de a un 
 2. DAG 01, que dispara el 02 y este el 03;
 3. DAG 04.
 
-`DESDE` y `HASTA` son fechas lógicas `ds`, inclusive. Para el periodo completo de Kaggle tarda unos 33 minutos. Con `REPROCESO=todos` vuelve a ejecutar fechas que ya se habían corrido; por ser idempotente, da los mismos resultados.
+`DESDE` y `HASTA` son fechas lógicas `ds`, inclusive. Para el periodo completo de Kaggle tarda unos 45 minutos. Con `REPROCESO=todos` vuelve a ejecutar fechas que ya se habían corrido; por ser idempotente, da los mismos resultados.
 
 Equivale a lanzar `airflow backfill create` sobre cada DAG. También se puede ejecutar un día suelto:
 
@@ -115,7 +116,8 @@ docker compose exec airflow-scheduler airflow dags trigger 01_ingesta_y_validaci
 ## Modelado
 
 - **Baseline:** promedio móvil de 28 días por tienda y familia, con un margen de seguridad del 15 %.
-- **Modelo de ML:** `HistGradientBoostingRegressor` con pérdida cuantílica (q = 0.71), usando lags de 7, 14 y 28 días, medias móviles, promociones, feriados, petróleo y calendario.
+- **Modelo de ML:** `HistGradientBoostingRegressor` con pérdida cuantílica, usando lags de 7, 14 y 28 días, medias móviles, promociones, feriados, petróleo y calendario. Se entrena un modelo por cuantil: el objetivo q = 0.71, que define el pedido, y p10, p50 y p90 para el intervalo (`params.yaml`). Las predicciones se ordenan para que los cuantiles no se crucen (`DECISIONES.md`, sección 11).
+- **Calibración:** fracción de la venta real por debajo de cada cuantil y cobertura del intervalo p10–p90, medidas en la validación (MLflow) y en el seguimiento de los pedidos publicados.
 - **Validación temporal**, igual para ambos: los últimos 14 días quedan fuera del entrenamiento.
 - **Métricas:** RMSE y MAE (técnicas) y **costo total de inventario** (negocio: quiebres × 5 + merma × 2). Gana el candidato de menor costo.
 - **Criterio de reemplazo:** el candidato reemplaza al modelo vigente solo si, **en la misma ventana de validación**, cuesta al menos un 2 % menos (`DECISIONES.md`, sección 9). Cada pedido usa el modelo que estaba vigente en su fecha.
@@ -129,7 +131,7 @@ Nada de datos ni de modelos va en Git. Al terminar, los DAGs 03, 04 y 05 ejecuta
 | `data/raw_kaggle/` | Datos de entrada (CSV de Kaggle) |
 | `data/raw/<ds>/` | Foto de lo entregado en la bandeja hasta `ds` |
 | `data/processed/<ds>/` | Datos validados y features |
-| `data/predictions/` | Pedidos publicados, su **manifiesto** `.json` y los reportes de seguimiento |
+| `data/predictions/` | Pronósticos diarios por cuantil, pedidos publicados, su **manifiesto** `.json` y los reportes de seguimiento |
 | `models/<nombre>/v<N>/` | Cada versión del modelo que se usó o se entrenó, exportada desde MLflow |
 
 El manifiesto de cada pedido registra:
@@ -162,71 +164,78 @@ python scripts/reproducir_pedido.py --clave 2017-07-31      # o: make reproducir
 El script hace tres cosas:
 1. comprueba que las features, los datos crudos y el modelo restaurados por DVC tengan las huellas del manifiesto;
 2. vuelve a pronosticar con ese modelo y esas features;
-3. compara byte a byte el pedido regenerado con el publicado.
+3. compara byte a byte el pedido y el pronóstico diario regenerados con los publicados.
 
 No usa MLflow ni la bandeja. Para el entorno del host use las mismas versiones que la imagen de Airflow: `pip install -r docker/airflow/requirements.txt`. El modelo se serializa con `skops` y necesita la misma versión de scikit-learn.
 
 ### Evidencia: reproducción desde un clon nuevo
 
-Publicación del periodo 2017-07-01 a 2017-08-15 (commit `6a3ce1a`, generado con el código de `39f15a7`), reproducida en una carpeta vacía:
+Publicación del periodo 2017-07-01 a 2017-08-15 con pronóstico por cuantiles (commit `b6561db`, generado con el código de `bd89c6a`), reproducida en una carpeta vacía:
 
 ```text
-$ git clone <repo> prueba-reproduccion && cd prueba-reproduccion && git checkout 6a3ce1a
-$ ls data/predictions models
-ls: cannot access 'data/predictions': No such file or directory
-ls: cannot access 'models': No such file or directory
-$ dvc pull                                   # 3 s: 35M data/raw, 97M data/processed, 4.2M data/predictions, 23M models
+$ git clone <repo> prueba-reproduccion && cd prueba-reproduccion && git checkout b6561db
+$ dvc pull                                   # 5 s: 35M data/raw, 97M data/processed, 52M data/predictions, 148M models
 
 $ python scripts/reproducir_pedido.py --clave 2017-07-31
-Pedido 2017-07-31: modelo v5, código 39f15a7b8339aae8f09860571344d1da1c923ced
+Pedido 2017-07-31: modelo v24, código bd89c6ae9a17281a6441fe4ba480ea8df3a8048f
   features      coincide con el manifiesto
   datos_crudos  coincide con el manifiesto
   modelo        coincide con el manifiesto
-  md5 publicado   06c2daad75b79f9dfecdffd56ff2bf00
-  md5 reproducido 06c2daad75b79f9dfecdffd56ff2bf00  (1782 filas)
+  md5 publicado   f3b2c98518e1dff261ce73a709fbd5f9
+  md5 reproducido f3b2c98518e1dff261ce73a709fbd5f9  (1782 filas)
+  pronóstico diario: publicado cf7d8685d182f07dfa8ab3fb3b1333f3, reproducido cf7d8685d182f07dfa8ab3fb3b1333f3
 Resultado: IDÉNTICO
 ```
 
-- **Los 43 pedidos del periodo se reproducen idénticos.** El 2017-07-01, el 2017-07-21, el 2017-07-31 y el 2017-08-15 se muestran en [`docs/EVIDENCIA.md`](docs/EVIDENCIA.md).
-- **Un pedido alterado a propósito** (una cantidad cambiada a mano) da `Resultado: DISTINTO`.
-- El pedido del 2017-07-31 tiene el mismo MD5 en dos publicaciones hechas con código distinto (`600d5ca` y `39f15a7`), porque los cambios entre ambas no afectan el cálculo del pedido.
+- **Los 43 pedidos y sus 43 pronósticos diarios se reproducen idénticos** ([`docs/EVIDENCIA.md`](docs/EVIDENCIA.md), sección 5).
+- **Un pronóstico alterado a propósito** (el p90 de una fila) da `Resultado: DISTINTO`, aunque el pedido siga igual.
+- **La publicación anterior** (commit `6a3ce1a`, modelo v5, sin pronóstico diario) se sigue reproduciendo idéntica con `git checkout 6a3ce1a && dvc checkout`.
 
 ## Evidencia de funcionamiento
 
 Resumen de `make periodo DESDE=2017-07-01 HASTA=2017-08-15`. El detalle, con todas las tablas, está en [`docs/EVIDENCIA.md`](docs/EVIDENCIA.md).
 
-**Ejecuciones en Airflow:** 0 tareas fallidas en 33 minutos.
+**Ejecuciones en Airflow:** 0 tareas fallidas en unos 44 minutos.
 
 | DAG | Runs exitosos | Notas |
 |---|---:|---|
-| 05 entrenamiento | 46 | 7 entrenamientos (domingos); los demás días, short-circuit |
+| 05 entrenamiento | 46 | 8 entrenamientos: el inicial (no había vigente) y los 7 domingos. Los demás días, short-circuit |
 | 01 ingesta y validación | 46 | 3 días omitidos por ventas tardías: 07-05, 07-28 y 08-07. 2 archivos en cuarentena |
 | 02 features | 43 | |
-| 03 pronóstico y pedido | 43 | 43 pedidos con manifiesto, versionados con DVC |
+| 03 pronóstico y pedido | 43 | 43 pronósticos diarios (p10/p50/p71/p90) y 43 pedidos con manifiesto, versionados con DVC |
 | 04 seguimiento | 46 | 36 pedidos evaluados con el horizonte completo |
 
-**Comparación de modelos.** Costo total de inventario en la ventana de validación de cada entrenamiento:
+**Comparación de modelos.** Costo total de inventario (con el p71) en la ventana de validación de cada entrenamiento:
 
-| Fecha de corte | Baseline | HGB (candidato) | Vigente v5 | Decisión |
+| Fecha de corte | Baseline | HGB (candidato) | Vigente v24 | Decisión |
 |---|---:|---:|---:|---|
-| 2017-07-02 | 10,728,587 | 4,476,412 | 4,515,259 | no reemplaza (mejora 0.9 %) |
-| 2017-07-09 | 10,292,861 | 4,616,634 | 4,644,324 | no reemplaza (0.6 %) |
-| 2017-07-16 | 8,640,706 | 4,614,713 | 4,614,944 | no reemplaza (0.0 %) |
-| 2017-07-23 | 8,691,291 | 4,541,512 | 4,570,200 | no reemplaza (0.6 %) |
-| 2017-07-30 | 8,351,865 | 4,545,015 | 4,519,935 | no reemplaza (−0.6 %) |
-| 2017-08-06 | 8,988,107 | 5,804,480 | 5,700,284 | no reemplaza (−1.8 %) |
-| 2017-08-13 | 8,288,274 | 5,934,833 | 5,980,119 | no reemplaza (0.8 %) |
+| 2017-07-01 | 9,597,618 | 4,810,618 | — | **promovido** (v24): no había vigente |
+| 2017-07-02 | 10,728,587 | 4,450,921 | 4,480,800 | no reemplaza (mejora 0.7 %) |
+| 2017-07-09 | 10,292,861 | 4,580,239 | 4,600,756 | no reemplaza (0.4 %) |
+| 2017-07-16 | 8,640,706 | 4,592,762 | 4,575,644 | no reemplaza (−0.4 %) |
+| 2017-07-23 | 8,691,291 | 4,498,332 | 4,533,972 | no reemplaza (0.8 %) |
+| 2017-07-30 | 8,351,865 | 4,516,918 | 4,488,191 | no reemplaza (−0.6 %) |
+| 2017-08-06 | 8,988,107 | 5,772,074 | 5,676,427 | no reemplaza (−1.7 %) |
+| 2017-08-13 | 8,288,274 | 5,902,127 | 5,959,426 | no reemplaza (1.0 %) |
 
-El modelo de ML reduce el costo del baseline entre un 28 % y un 58 % en cada corte. Ningún candidato mejoró al vigente (v5, entrenado al 2017-07-01) por el 2 % exigido, así que los 43 pedidos usan v5.
+El modelo de ML reduce el costo del baseline entre un 29 % y un 59 % en cada corte. Ningún candidato mejoró al vigente por el 2 % exigido, así que los 43 pedidos usan v24.
 
 **Seguimiento del desempeño.** 36 pedidos con el horizonte completo, emitidos del 2017-07-01 al 2017-08-08:
 
 | Venta real | Pedido | Cobertura | Quiebre | Merma | MAE medio | Costo real |
 |---:|---:|---:|---:|---:|---:|---:|
-| 212.9 M | 225.1 M | 105.7 % | 2.5 % de la venta | 8.2 % de la venta | 356.6 | 61.9 M |
+| 212.9 M | 225.0 M | 105.7 % | 2.5 % de la venta | 8.2 % de la venta | 355.7 | 61.7 M |
 
+**Calibración del pronóstico diario.** Fracción de las ventas reales diarias por debajo de cada cuantil publicado, en promedio sobre los 36 pedidos:
+
+| p10 | p50 | p71 (pedido) | p90 | Dentro de p10–p90 |
+|---:|---:|---:|---:|---:|
+| 14.8 % | 52.8 % | 72.0 % | 89.5 % | 89.2 % |
+
+- **El p71, que decide el pedido, está calibrado: 72.0 % frente al 71 %**, y lo mismo el p50 y el p90.
+- El intervalo p10–p90 cubre el 89 % y no el 80 % porque es conservador en la cola baja. Las series que no venden tienen p10 = 0 y venta 0, así que cuentan "por debajo" y "dentro" a la vez.
 - **11 pedidos cambiaron su venta real entre evaluaciones**, porque llegaron correcciones o ventas tardías después. El DAG 04 reevalúa con la última versión de los datos.
-- **En agosto suben la merma y el MAE** (de 412 a 594): el seguimiento muestra que el modelo vigente se está quedando atrás, aunque en la validación de cada entrenamiento los candidatos no lo superaron. Ver `docs/EVIDENCIA.md`.
+- **En agosto suben la merma y el MAE** (de 411 a 594) y el p50 pasa del 55 %: el modelo vigente sobrestima, aunque en la validación de cada entrenamiento los candidatos no lo superaron. Ver `docs/EVIDENCIA.md`.
 
 ## Pruebas y CI
 

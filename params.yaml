@@ -4,6 +4,9 @@
 entrenamiento:
   dias_historia: 365          # días de ventas usados para entrenar (acota memoria y tiempo)
   dia_reentrenamiento: 6      # día de la semana en que el DAG 05 reentrena (0 = lunes ... 6 = domingo)
+  # Cuantiles del pronóstico diario además del objetivo (el del pedido, en costos.yaml): un
+  # modelo por cuantil. p10-p90 es el intervalo del 80 % (ver DECISIONES.md, sección 11).
+  cuantiles_intervalo: [0.10, 0.50, 0.90]
   hiperparametros:            # HistGradientBoostingRegressor
     max_iter: 300
     learning_rate: 0.05

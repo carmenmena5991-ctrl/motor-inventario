@@ -192,7 +192,8 @@ El seguimiento al 2017-08-15 de los 14 pedidos emitidos del 26-jul al 8-ago (mod
 `data/predictions/pedido_<clave>.json` registra el commit del código (y si `src/`, `dags/`, `config/` o `params.yaml` tenían cambios sin confirmar), la versión del modelo y las huellas MD5 del modelo exportado, de los datos crudos, de las features y del propio pedido. No incluye la hora de generación: re-ejecutar la tarea produce el mismo archivo (idempotencia).
 
 ### 10.3 DVC dentro de los contenedores
-- El repo se monta en `/opt/airflow` (punteros `.dvc`, `.dvc/` con la caché, `models/`) y `.git` **en solo lectura**, solo para leer el commit.
+- El repo completo se monta **como carpeta** en `/opt/airflow/repo`: punteros `.dvc`, `.dvc/` con la caché, `models/` y `params.yaml`. `.git` va encima **en solo lectura**, solo para leer el commit. DVC y git trabajan desde ahí (`INVENTARIO_REPO`); los datos son los mismos archivos que ven los DAGs en `/opt/airflow/data` y `/opt/airflow/models`.
+- **Nunca se montan archivos sueltos.** Docker monta un archivo por su inodo, y cuando el host lo reemplaza (un editor, `git checkout`, `git pull`) el contenedor sigue viendo el viejo. Pasó con `params.yaml`: el contenedor entrenó con la versión anterior, sin los cuantiles de la sección 11. También pasó con `models.dvc`: DVC actualizaba un archivo que ya no estaba en el repo. Los datos no se perdieron (están en la caché y en el remoto), pero el puntero del host quedó desactualizado. Una prueba (`test_compose_no_monta_archivos_sueltos`) impide volver a hacerlo.
 - DVC corre con `core.no_scm = true` (configuración global de la imagen, `docker/airflow/dvc-global/config`): **nunca modifica el índice ni el historial de git del host**.
 - El remoto se monta en la misma ruta que tiene en `.dvc/config`, tomada de `DVC_REMOTO` en `.env`. Si no está montado (un clon nuevo, por ejemplo), `dvc push` crearía el directorio dentro del contenedor y los datos se perderían; por eso `versionar` lo verifica antes, deja los datos en la caché local y lo informa en el log sin fallar (situación esperada).
 
@@ -206,4 +207,27 @@ git checkout <commit con los punteros .dvc de esa publicación>
 dvc checkout            # o dvc pull, si los datos no están en la caché local
 python scripts/reproducir_pedido.py --clave 2017-07-31
 ```
-`inventario.reproduccion` comprueba que las features, los datos crudos y el modelo coincidan con las huellas del manifiesto, vuelve a pronosticar y compara el pedido regenerado byte a byte con el publicado. No usa MLflow ni la bandeja.
+`inventario.reproduccion` comprueba que las features, los datos crudos y el modelo coincidan con las huellas del manifiesto, vuelve a pronosticar y compara el pedido regenerado byte a byte con el publicado. Si el manifiesto incluye el pronóstico diario (sección 11), también lo compara. No usa MLflow ni la bandeja.
+
+## 11. Pronóstico diario con incertidumbre (cuantiles)
+### 11.1 Qué se publica
+En cada `ds`, el DAG 03 publica, además del pedido, `data/predictions/pronostico_<ds>.csv`: una fila por **día del horizonte, tienda y familia**, con los cuantiles **p10, p50, p71 y p90** y la versión del modelo.
+- **p71 es el cuantil objetivo**, el ratio crítico de la sección 7. El pedido es la suma del p71 del horizonte.
+- **p10–p90 es el intervalo del 80 %**: expresa la incertidumbre del pronóstico.
+- **p50 es la mediana**: la referencia de "venta esperada" para el negocio.
+
+El pronóstico entra en el manifiesto y en la reproducción (sección 10), y lo versiona DVC junto con el pedido.
+
+### 11.2 Cómo se estiman
+- **Un `HistGradientBoostingRegressor` con pérdida cuantílica por cuantil** (`ModeloCuantiles`), con las mismas features e hiperparámetros. Los cuantiles extra se configuran en `params.yaml` (`entrenamiento.cuantiles_intervalo`) y el objetivo sigue en `config/costos.yaml`. Todos viven en **una sola versión del Model Registry**: el pedido y su intervalo salen siempre del mismo entrenamiento.
+- **Sin cruces:** cada modelo se entrena por separado, así que en alguna fila p90 podría quedar por debajo de p71. Las predicciones se **ordenan por fila** (*monotone rearrangement*), lo que no empeora el error de ningún cuantil. `predict()` devuelve el objetivo ya ordenado: el costo de validación, el criterio de reemplazo y el pedido usan exactamente el mismo p71 que el pronóstico publicado.
+- **Calibración:** cada entrenamiento registra en MLflow la fracción de la venta real que queda por debajo de cada cuantil en la ventana de validación (un p90 bien calibrado deja ~90 %), además de la cobertura y el ancho del intervalo p10–p90. El DAG 04 mide lo mismo con las ventas reales de cada pedido publicado (`cobertura_pXX` y `cobertura_p10_p90` en `seguimiento_<ds>.csv`).
+- **Costo:** un entrenamiento pasa de ~40 s a ~80 s. El pico de memoria no aumenta, porque los modelos se ajustan uno tras otro: se midieron 1.06 GiB, frente a 1.57 GiB en la medición de la sección 5, siempre por debajo del límite de 3.5 GiB del scheduler. El periodo completo pasa de ~33 a ~45 minutos.
+
+### 11.3 Versiones anteriores
+Las versiones registradas antes de este cambio (sin etiqueta `cuantiles`) estiman un solo cuantil y **no se consideran vigentes**, como pasó con las anteriores al criterio de reemplazo (sección 9.3). La primera ejecución con este código entrena un modelo nuevo para el primer `ds`. Las publicaciones anteriores (por ejemplo, el commit `6a3ce1a`) se siguen reproduciendo con su propio modelo: su manifiesto no incluye pronóstico diario y la reproducción lo tiene en cuenta.
+
+### 11.4 Alternativas descartadas
+- **Intervalos por residuos recientes** (estilo conformal, sin reentrenar): con el modelo vigente se calculan los errores de los últimos días sobre la historia de las features. Funciona con cualquier modelo, pero cerca de la fecha de entrenamiento esos errores son dentro de la muestra y el intervalo sale demasiado estrecho.
+- **Un solo modelo multi-cuantil o distribucional** (p. ej. NGBoost o LightGBM con varias salidas): agrega dependencias y deja de ser comparable con el modelo de la sección 7.
+- **Derivar el intervalo del baseline** (promedio ± desviación): supone errores simétricos, y las ventas por tienda y familia son asimétricas, con muchos ceros y picos.

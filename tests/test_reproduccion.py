@@ -13,8 +13,9 @@ from inventario.predecir import (
     cargar_modelo_local,
     generar_pedido,
     guardar_pedido,
+    guardar_pronostico,
     preparar_features_prediccion,
-    pronosticar_desde_features,
+    pronosticar_con_cuantiles,
 )
 from inventario.reproduccion import reproducir_pedido
 from inventario.versionado import exportar_modelo, guardar_manifiesto, manifiesto_pedido
@@ -38,7 +39,8 @@ def publicado(bandeja, ruta_costos, mlflow_local, tmp_path):
     ruta_modelo = exportar_modelo(version, "modelo_prueba", base, mlflow_local)
 
     corte = pd.Timestamp(DS)
-    pronostico = pronosticar_desde_features(cargar_modelo_local(ruta_modelo), pd.read_parquet(r.features), corte)
+    pronostico = pronosticar_con_cuantiles(cargar_modelo_local(ruta_modelo), pd.read_parquet(r.features), corte)
+    guardar_pronostico(pronostico, r.pronostico, modelo_version=version)
     guardar_pedido(generar_pedido(pronostico, corte, modelo_version=version), corte, ruta=r.pedido)
     guardar_manifiesto(manifiesto_pedido(r, "modelo_prueba", version, ruta_modelo), r.manifiesto)
     return r
@@ -47,8 +49,34 @@ def publicado(bandeja, ruta_costos, mlflow_local, tmp_path):
 def test_pedido_publicado_se_reproduce_identico(publicado):
     resultado = reproducir_pedido(DS, publicado.base)
     assert resultado.verificaciones == {"features": True, "datos_crudos": True, "modelo": True}
+    assert resultado.tiene_pronostico
+    assert resultado.md5_pronostico_publicado == resultado.md5_pronostico_reproducido != ""
     assert resultado.identico
     assert resultado.filas == 4
+
+
+def test_pronostico_diario_alterado_no_es_identico(publicado):
+    pronostico = pd.read_csv(publicado.pronostico)
+    pronostico.loc[0, "p90"] += 1
+    pronostico.to_csv(publicado.pronostico, index=False)
+
+    resultado = reproducir_pedido(DS, publicado.base)
+    assert resultado.md5_publicado == resultado.md5_reproducido  # el pedido sigue igual
+    assert not resultado.identico
+
+
+def test_manifiesto_anterior_sin_pronostico_se_sigue_reproduciendo(publicado):
+    """Las publicaciones previas a la sección 11 no tienen pronóstico diario."""
+    import json
+
+    m = json.loads(publicado.manifiesto.read_text())
+    m.pop("pronostico")
+    publicado.manifiesto.write_text(json.dumps(m))
+    publicado.pronostico.unlink()
+
+    resultado = reproducir_pedido(DS, publicado.base)
+    assert not resultado.tiene_pronostico
+    assert resultado.identico
 
 
 def test_manifiesto_es_idempotente(publicado):

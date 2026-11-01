@@ -32,6 +32,9 @@ def main() -> int:
         print(f"  {nombre:<13} {'coincide' if ok else 'NO coincide'} con el manifiesto")
     print(f"  md5 publicado   {r.md5_publicado or '(no existe)'}")
     print(f"  md5 reproducido {r.md5_reproducido or '(no se regeneró)'}  ({r.filas} filas)")
+    if r.tiene_pronostico:
+        print(f"  pronóstico diario: publicado {r.md5_pronostico_publicado or '(no existe)'}, "
+              f"reproducido {r.md5_pronostico_reproducido or '(no se regeneró)'}")
     print("Resultado: IDÉNTICO" if r.identico else "Resultado: DISTINTO")
     return 0 if r.identico else 1
 

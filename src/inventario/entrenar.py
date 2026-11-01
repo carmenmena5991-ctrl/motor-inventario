@@ -54,6 +54,7 @@ HIPERPARAMETROS_DEFAULT = {
 # tipos sin revisarlos.
 TIPOS_CONFIABLES_SKOPS = [
     "inventario.entrenar.BaselinePromedioMovil",
+    "inventario.entrenar.ModeloCuantiles",
     "sklearn.ensemble._hist_gradient_boosting.predictor.TreePredictor",
     "sklearn.utils.validation.check_array",
     "functools.partial",
@@ -111,6 +112,66 @@ def construir_modelo_ml(cuantil: float, hiperparametros: dict[str, Any] | None =
         loss="quantile", quantile=cuantil, categorical_features=es_categorica, **hp
     )
     return Pipeline([("preprocesado", preprocesado), ("regresor", regresor)])
+
+
+def nombre_cuantil(cuantil: float) -> str:
+    """0.71 -> "p71": nombre de la columna de un cuantil en el pronóstico."""
+    return f"p{round(float(cuantil) * 100):d}"
+
+
+class ModeloCuantiles(RegressorMixin, BaseEstimator):
+    """Un HistGradientBoosting cuantílico por cuantil: el objetivo (el del pedido) y los
+    del intervalo de incertidumbre (p. ej. p10, p50, p90).
+
+    `predict` devuelve el cuantil objetivo, así que el costo, el criterio de reemplazo y el
+    pedido se calculan igual que con un solo modelo. `predict_cuantiles` devuelve todos.
+
+    Los modelos se entrenan por separado y sus predicciones pueden cruzarse (p. ej. p90 <
+    p71 en alguna fila). Se ordenan por fila (*monotone rearrangement*): el conjunto de
+    valores no cambia, solo qué cuantil recibe cada uno, y el error de cada cuantil no
+    empeora. El cuantil objetivo que usa `predict` es el ya ordenado, el mismo del pronóstico.
+    """
+
+    def __init__(
+        self,
+        cuantil_objetivo: float = 0.71,
+        cuantiles_intervalo: tuple[float, ...] = (),
+        hiperparametros: dict[str, Any] | None = None,
+    ):
+        self.cuantil_objetivo = cuantil_objetivo
+        self.cuantiles_intervalo = cuantiles_intervalo
+        self.hiperparametros = hiperparametros
+
+    def cuantiles(self) -> list[float]:
+        return sorted({round(float(q), 4) for q in (self.cuantil_objetivo, *self.cuantiles_intervalo)})
+
+    def fit(self, X: pd.DataFrame, y):
+        self.modelos_ = {
+            nombre_cuantil(q): construir_modelo_ml(q, self.hiperparametros).fit(X, y) for q in self.cuantiles()
+        }
+        return self
+
+    def predict_cuantiles(self, X: pd.DataFrame) -> pd.DataFrame:
+        columnas = [nombre_cuantil(q) for q in self.cuantiles()]
+        crudo = np.column_stack([self.modelos_[c].predict(X) for c in columnas])
+        ordenado = np.sort(np.clip(crudo, 0, None), axis=1)
+        return pd.DataFrame(ordenado, columns=columnas, index=X.index)
+
+    def predict(self, X: pd.DataFrame) -> np.ndarray:
+        return self.predict_cuantiles(X)[nombre_cuantil(self.cuantil_objetivo)].to_numpy()
+
+
+def cobertura_cuantiles(y: np.ndarray, cuantiles: pd.DataFrame) -> dict[str, float]:
+    """Calibración: fracción de valores reales por debajo de cada cuantil (un p90 bien
+    calibrado deja ~90 % por debajo) y dentro del intervalo entre el menor y el mayor."""
+    y = np.asarray(y, dtype=float)
+    resultado = {f"cobertura_{c}": float(np.mean(y <= cuantiles[c].to_numpy())) for c in cuantiles.columns}
+    if len(cuantiles.columns) >= 3:
+        bajo, alto = cuantiles.columns[0], cuantiles.columns[-1]
+        dentro = (y >= cuantiles[bajo].to_numpy()) & (y <= cuantiles[alto].to_numpy())
+        resultado[f"cobertura_{bajo}_{alto}"] = float(np.mean(dentro))
+        resultado[f"ancho_medio_{bajo}_{alto}"] = float(np.mean(cuantiles[alto] - cuantiles[bajo]))
+    return resultado
 
 
 def dividir_temporal(features: pd.DataFrame, dias_validacion: int) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -191,8 +252,9 @@ def version_vigente_a_fecha(
     fecha (etiqueta `fecha_corte` <= fecha). Si hay varias con la misma fecha, la más reciente.
 
     Así un pedido usa el modelo que existía al emitirlo, aunque los backfills de los DAGs 05
-    y 01 se ejecuten en otro orden. Las versiones sin etiqueta `decision` (anteriores al
-    criterio de reemplazo) no se consideran.
+    y 01 se ejecuten en otro orden. No se consideran las versiones sin etiqueta `decision`
+    (anteriores al criterio de reemplazo) ni sin etiqueta `cuantiles` (anteriores al
+    pronóstico con intervalos de incertidumbre).
     """
     limite = str(pd.Timestamp(fecha).date())
     cliente = MlflowClient(tracking_uri=resolver_tracking_uri(tracking_uri))
@@ -203,7 +265,9 @@ def version_vigente_a_fecha(
     candidatas = [
         (v.tags["fecha_corte"], int(v.version))
         for v in versiones
-        if v.tags.get("decision") == "promovido" and v.tags.get("fecha_corte", "9999") <= limite
+        if v.tags.get("decision") == "promovido"
+        and "cuantiles" in v.tags
+        and v.tags.get("fecha_corte", "9999") <= limite
     ]
     return str(max(candidatas)[1]) if candidatas else None
 
@@ -234,6 +298,7 @@ def entrenar(
     alias: str = ALIAS_CAMPEON,
     etiquetas: dict[str, str] | None = None,
     mejora_minima: float = 0.0,
+    cuantiles_intervalo: tuple[float, ...] = (),
 ) -> ResultadoEntrenamiento:
     """Entrena Baseline y ML, registra el mejor como candidato y decide si reemplaza al
     modelo vigente a la fecha de corte (`version_vigente_a_fecha` + `decidir_reemplazo`).
@@ -258,7 +323,10 @@ def entrenar(
         "baseline_promedio_movil": BaselinePromedioMovil(
             factor_seguridad=float(pedido["factor_seguridad_default"])
         ),
-        "hist_gradient_boosting": construir_modelo_ml(float(pedido["cuantil_objetivo"]), hiperparametros),
+        # El cuantil objetivo (el del pedido) y los del intervalo de incertidumbre.
+        "hist_gradient_boosting": ModeloCuantiles(
+            float(pedido["cuantil_objetivo"]), tuple(float(q) for q in cuantiles_intervalo), hiperparametros
+        ),
     }
 
     tracking_uri = resolver_tracking_uri(tracking_uri)
@@ -289,9 +357,16 @@ def entrenar(
                 pred = np.clip(modelo.predict(X_va), 0, None)
                 metricas[nombre] = evaluar(y_va, pred, config)
 
-                parametros = modelo.get_params(deep=False) if nombre.startswith("baseline") else (
-                    modelo.named_steps["regresor"].get_params()
-                )
+                if isinstance(modelo, ModeloCuantiles):
+                    objetivo = modelo.modelos_[nombre_cuantil(modelo.cuantil_objetivo)]
+                    parametros = {
+                        **objetivo.named_steps["regresor"].get_params(),
+                        "cuantiles": ",".join(modelo.modelos_),
+                    }
+                    # Calibración en la ventana de validación (métricas aparte del costo).
+                    mlflow.log_metrics(cobertura_cuantiles(y_va, modelo.predict_cuantiles(X_va)))
+                else:
+                    parametros = modelo.get_params(deep=False)
                 mlflow.log_params({"modelo": nombre, **{k: v for k, v in parametros.items() if k != "categorical_features"}})
                 mlflow.log_metrics(metricas[nombre])
                 modelos_logueados[nombre] = mlflow.sklearn.log_model(
@@ -323,8 +398,12 @@ def entrenar(
 
     version = mlflow.register_model(modelos_logueados[ganador].model_uri, nombre_modelo)
     cliente = MlflowClient(tracking_uri=tracking_uri)
+    modelo_ganador = candidatos[ganador]
     etiquetas_version = {
         "modelo": ganador,
+        # Columnas del pronóstico que entrega esta versión (el baseline solo el objetivo).
+        "cuantiles": ",".join(modelo_ganador.modelos_) if isinstance(modelo_ganador, ModeloCuantiles)
+        else nombre_cuantil(float(pedido["cuantil_objetivo"])),
         "costo_total_inventario": str(costo_candidato),
         "decision": "promovido" if promovido else "no_promovido",
         "motivo": motivo,
@@ -375,6 +454,7 @@ def ejecutar_entrenamiento(
         dias_historia = params["entrenamiento"]["dias_historia"]
     kwargs.setdefault("hiperparametros", params["entrenamiento"]["hiperparametros"])
     kwargs.setdefault("mejora_minima", float(params["promocion"]["mejora_minima"]))
+    kwargs.setdefault("cuantiles_intervalo", tuple(params["entrenamiento"].get("cuantiles_intervalo") or ()))
 
     datos = leer_bandeja(fecha_corte, bandeja, fecha_conocimiento=fecha_conocimiento)
     if exigir_datos_del_dia:
