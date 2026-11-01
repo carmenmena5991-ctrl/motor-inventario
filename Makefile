@@ -20,7 +20,7 @@ detener:
 
 periodo:
 	@test -n "$(DESDE)" -a -n "$(HASTA)" || (echo "Uso: make periodo DESDE=AAAA-MM-DD HASTA=AAAA-MM-DD [REPROCESO=ninguno|fallidos|todos]"; exit 2)
-	docker compose exec airflow-scheduler python /opt/airflow/scripts/ejecutar_periodo.py \
+	docker compose exec -T airflow-scheduler python /opt/airflow/scripts/ejecutar_periodo.py \
 		--desde $(DESDE) --hasta $(HASTA) --reproceso $(REPROCESO)
 
 reproducir:
