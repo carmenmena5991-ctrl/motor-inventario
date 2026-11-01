@@ -205,6 +205,10 @@ Resumen de `make periodo DESDE=2017-07-01 HASTA=2017-08-15`. El detalle, con tod
 | 03 pronóstico y pedido | 43 | 43 pronósticos diarios (p10/p50/p71/p90) y 43 pedidos con manifiesto, versionados con DVC |
 | 04 seguimiento | 46 | 36 pedidos evaluados con el horizonte completo |
 
+![Grid del DAG 03 en Airflow](docs/img/airflow-grid-03.png)
+
+Hay más capturas de Airflow y de MLflow, con su descripción, en [`docs/EVIDENCIA.md`](docs/EVIDENCIA.md), sección 6.
+
 **Comparación de modelos.** Costo total de inventario (con el p71) en la ventana de validación de cada entrenamiento:
 
 | Fecha de corte | Baseline | HGB (candidato) | Vigente v24 | Decisión |
@@ -219,6 +223,8 @@ Resumen de `make periodo DESDE=2017-07-01 HASTA=2017-08-15`. El detalle, con tod
 | 2017-08-13 | 8,288,274 | 5,902,127 | 5,959,426 | no reemplaza (1.0 %) |
 
 El modelo de ML reduce el costo del baseline entre un 29 % y un 59 % en cada corte. Ningún candidato mejoró al vigente por el 2 % exigido, así que los 43 pedidos usan v24.
+
+![Model Registry en MLflow: v24 con @Champions](docs/img/mlflow-registro.png)
 
 **Seguimiento del desempeño.** 36 pedidos con el horizonte completo, emitidos del 2017-07-01 al 2017-08-08:
 
